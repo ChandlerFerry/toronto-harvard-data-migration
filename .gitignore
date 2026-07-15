@@ -1,0 +1,13 @@
+node_modules/
+dist/
+coverage/
+*.log
+.DS_Store
+# Migration run artifacts
+reports/
+*.run-report.json
+*.run-report.csv
+
+# Demo runtime artifacts (LocalStack volume + generated git-mapping fixture)
+.localstack/
+.demo/

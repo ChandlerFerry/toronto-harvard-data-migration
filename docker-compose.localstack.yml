@@ -1,0 +1,14 @@
+# Manual LocalStack for local dev / exploration.
+#   docker compose -f docker-compose.localstack.yml up -d
+#   AWS_ENDPOINT_URL=http://localhost:4566 aws --region us-east-2 s3 ls
+# Integration tests use testcontainers and do NOT need this file.
+services:
+  localstack:
+    image: localstack/localstack:4
+    ports:
+      - "4566:4566"
+    environment:
+      - SERVICES=s3
+      - DEBUG=0
+    volumes:
+      - "./.localstack:/var/lib/localstack"
