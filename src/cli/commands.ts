@@ -238,7 +238,7 @@ export function makeMigrateCommand(deps: CliDeps): Command {
   return withCommonOptions(
     new Command("dvc-migrate")
       .description(
-        "Migrate a monolithic DVC remote into per-provider buckets (verbatim server-side copy, memory-sharded), then deep-verify. Does NOT delete and does NOT touch .dvc files (use dvc-upgrade for the v3 upgrade).",
+        "Migrate a monolithic DVC remote into per-provider buckets (verbatim server-side copy, memory-sharded), then deep-verify. Does NOT delete and does NOT touch .dvc files (use repoint to point the .dvc files at the new buckets).",
       )
       .option("--concurrency <n>", "copy concurrency", parseInt10),
     deps,
