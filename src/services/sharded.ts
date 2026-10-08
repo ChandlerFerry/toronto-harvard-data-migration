@@ -7,7 +7,6 @@ import type { MissingEntry } from "../domain/diff.js";
 import { V3_PREFIX, isDvcObjectKey, keyToMd5, tryKeyToMd5 } from "../domain/dvcKey.js";
 import { type DestResolver, buildPlan, identityResolver, planDestBuckets } from "../domain/plan.js";
 import type { ListedObject, ObjectStore } from "../ports/objectStore.js";
-import { VerificationGapError } from "./deleteOld.js";
 import { type TransferError, type TransferOptions, transfer } from "./transfer.js";
 import { type VerifyReport, proveDeletable, verifyLists } from "./verify.js";
 
@@ -244,81 +243,6 @@ export async function verifySharded(
   return report;
 }
 
-export interface ShardedDeleteOptions extends ShardedVerifyOptions {
-  dryRun?: boolean;
-  allowProduction?: boolean;
-  env?: NodeJS.ProcessEnv;
-}
-
-export interface ShardedDeleteReport {
-  dryRun: boolean;
-  deleted: number;
-  targetCount: number;
-  shards: number;
-
-  incompleteShards: string[];
-}
-
-export async function deleteOldSharded(
-  store: ObjectStore,
-  oldBucket: string,
-  newBucket: string,
-  opts: ShardedDeleteOptions = {},
-): Promise<ShardedDeleteReport> {
-  const dryRun = opts.dryRun ?? DEFAULT_DRY_RUN;
-
-  const deep = opts.deep ?? true;
-  const shardLength = resolveShardLength(opts.shardLength);
-
-  const newBuckets = opts.newBuckets?.length ? [...opts.newBuckets] : [newBucket];
-
-  const vr = await verifySharded(store, oldBucket, store, newBucket, {
-    deep,
-    shardLength,
-    newBuckets,
-    ...(opts.expectBucketByMd5 !== undefined ? { expectBucketByMd5: opts.expectBucketByMd5 } : {}),
-    ...(opts.keepMd5 !== undefined ? { keepMd5: opts.keepMd5 } : {}),
-  });
-  if (!vr.ok) throw new VerificationGapError(vr);
-
-  const guardOpts: ProductionGuardOptions = {};
-  if (opts.allowProduction !== undefined) guardOpts.allowProduction = opts.allowProduction;
-  if (opts.env !== undefined) guardOpts.env = opts.env;
-  ensureNotProduction(oldBucket, guardOpts);
-
-  if (dryRun) {
-    return {
-      dryRun: true,
-      deleted: 0,
-      targetCount: vr.matchedCount,
-      shards: vr.shards,
-      incompleteShards: [],
-    };
-  }
-
-  let deleted = 0;
-  const incompleteShards: string[] = [];
-  for (const prefix of md5Prefixes(shardLength)) {
-    let oldList = await listShard(store, oldBucket, prefix);
-    if (opts.keepMd5 !== undefined) oldList = filterByMd5(oldList, opts.keepMd5);
-    const r = await verifyShard(oldList, store, newBuckets, prefix, deep, opts.expectBucketByMd5);
-    if (r.missing.length > 0) {
-      incompleteShards.push(prefix);
-      continue;
-    }
-    if (r.matched.length > 0) await store.deleteBatch(oldBucket, r.matched);
-    deleted += r.matched.length;
-  }
-
-  return {
-    dryRun: false,
-    deleted,
-    targetCount: vr.matchedCount,
-    shards: vr.shards,
-    incompleteShards,
-  };
-}
-
 export interface DeleteAgainstOptions {
   dryRun?: boolean;
   allowProduction?: boolean;
@@ -328,6 +252,8 @@ export interface DeleteAgainstOptions {
   shardLength?: number;
 
   expectBucketByMd5?: (md5: string) => string;
+
+  allowSizeOnly?: boolean;
 }
 
 export interface DeleteAgainstReport {
@@ -375,12 +301,25 @@ export async function deleteOldAgainstBuckets(
 
     const proven = proveDeletable(oldScoped, flat, deep);
     const decision = { matched: proven.deletable, missing: proven.corrupt, ok: true };
+    if (opts.allowSizeOnly !== true && proven.sizeOnlyKeys.length > 0) {
+      const sizeOnly = new Set(proven.sizeOnlyKeys);
+      const oldSizeByKey = new Map(oldScoped.map((o) => [o.key, o.size]));
+      decision.matched = decision.matched.filter((k) => !sizeOnly.has(k));
+      for (const key of sizeOnly) {
+        decision.missing.push({
+          key,
+          md5: keyToMd5(key),
+          reason: "size-only",
+          oldSize: oldSizeByKey.get(key) ?? 0,
+        });
+      }
+    }
     if (opts.expectBucketByMd5 !== undefined) {
       applyDestinationAssertion(decision, oldScoped, bucketsByMd5, opts.expectBucketByMd5);
     }
 
     targetCount += decision.matched.length;
-    deepEtagSkipped += proven.deepEtagSkipped;
+    deepEtagSkipped += proven.sizeOnlyKeys.length;
     for (const m of decision.missing) corrupt.push(m);
     if (!dryRun && decision.matched.length > 0) {
       await store.deleteBatch(oldBucket, decision.matched);

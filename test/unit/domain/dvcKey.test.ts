@@ -3,9 +3,7 @@ import {
   InvalidHashError,
   InvalidKeyError,
   V3_PREFIX,
-  detectLayout,
   isDirHash,
-  isDirKey,
   isDvcObjectKey,
   isValidHash,
   isValidMd5,
@@ -65,7 +63,7 @@ describe("md5ToKey", () => {
   });
 });
 
-describe("parseKey / keyToMd5 / detectLayout", () => {
+describe("parseKey / keyToMd5", () => {
   it("parses v2 key", () => {
     expect(parseKey("cf/57cd0bb66208ae44482bab397e6c42")).toEqual({
       hash: MD5,
@@ -87,12 +85,8 @@ describe("parseKey / keyToMd5 / detectLayout", () => {
       isDir: true,
     });
   });
-  it("keyToMd5 + detectLayout + isDirKey helpers", () => {
-    const v3 = `${V3_PREFIX}cf/57cd0bb66208ae44482bab397e6c42`;
-    expect(keyToMd5(v3)).toBe(MD5);
-    expect(detectLayout(v3)).toBe("v3");
-    expect(isDirKey(v3)).toBe(false);
-    expect(isDirKey("a1/b2c3d4e5f60718293a4b5c6d7e8f90.dir")).toBe(true);
+  it("keyToMd5 strips the v3 prefix", () => {
+    expect(keyToMd5(`${V3_PREFIX}cf/57cd0bb66208ae44482bab397e6c42`)).toBe(MD5);
   });
   it.each([
     ["c/57cd0bb66208ae44482bab397e6c42", "slash not at pos 2"],

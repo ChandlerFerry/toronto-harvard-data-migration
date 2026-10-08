@@ -1,6 +1,6 @@
 import { type DiffReport, type MissingEntry, type ObjectMeta, diffByMd5 } from "../domain/diff.js";
 import { isDvcObjectKey, keyToMd5 } from "../domain/dvcKey.js";
-import type { ListedObject, ObjectStore } from "../ports/objectStore.js";
+import type { ListedObject } from "../ports/objectStore.js";
 
 export interface VerifyOptions {
   plannedKeys?: readonly string[];
@@ -15,6 +15,8 @@ export interface VerifyReport extends DiffReport {
   deepChecked: number;
 
   deepEtagSkipped: number;
+
+  sizeOnlyKeys: string[];
 }
 
 function toMeta(list: ListedObject[]): ObjectMeta[] {
@@ -34,7 +36,7 @@ interface EtagCorruptionResult {
 
   deepChecked: number;
 
-  deepEtagSkipped: number;
+  sizeOnlyKeys: string[];
 }
 
 function findEtagCorruption(
@@ -57,7 +59,7 @@ function findEtagCorruption(
 
   const corrupted: MissingEntry[] = [];
   let deepChecked = 0;
-  let deepEtagSkipped = 0;
+  const sizeOnlyKeys: string[] = [];
 
   for (const oldKey of report.matched) {
     const md5 = keyToMd5(oldKey);
@@ -91,11 +93,11 @@ function findEtagCorruption(
         oldSize: size,
       });
     } else if (!comparedAny) {
-      deepEtagSkipped += 1;
+      sizeOnlyKeys.push(oldKey);
     }
   }
 
-  return { corrupted, deepChecked, deepEtagSkipped };
+  return { corrupted, deepChecked, sizeOnlyKeys };
 }
 
 export function verifyLists(
@@ -116,12 +118,12 @@ export function verifyLists(
 
   const report = diffByMd5(oldObjs, newObjs);
   let deepChecked = 0;
-  let deepEtagSkipped = 0;
+  let sizeOnlyKeys: string[] = [];
 
   if (opts.deep === true && report.missing.length === 0) {
     const etagResult = findEtagCorruption(report, oldDvc, newDvc, oldObjs);
     deepChecked = etagResult.deepChecked;
-    deepEtagSkipped = etagResult.deepEtagSkipped;
+    sizeOnlyKeys = etagResult.sizeOnlyKeys;
     if (etagResult.corrupted.length > 0) {
       report.missing.push(...etagResult.corrupted);
       const bad = new Set(etagResult.corrupted.map((e) => e.key));
@@ -135,7 +137,8 @@ export function verifyLists(
     oldCount: oldObjs.length,
     newCount: newObjs.length,
     deepChecked,
-    deepEtagSkipped,
+    deepEtagSkipped: sizeOnlyKeys.length,
+    sizeOnlyKeys,
   };
 }
 
@@ -143,14 +146,10 @@ export function proveDeletable(
   oldList: ListedObject[],
   newList: ListedObject[],
   deep: boolean,
-): { deletable: string[]; corrupt: MissingEntry[]; deepEtagSkipped: number } {
+): { deletable: string[]; corrupt: MissingEntry[]; sizeOnlyKeys: string[] } {
   const sized = verifyLists(oldList, newList, { deep: false });
   if (!deep) {
-    return {
-      deletable: sized.matched,
-      corrupt: sized.missing,
-      deepEtagSkipped: sized.matched.length,
-    };
+    return { deletable: sized.matched, corrupt: sized.missing, sizeOnlyKeys: sized.matched };
   }
   const sizeMatched = new Set(sized.matched);
   const candidates = oldList.filter((o) => sizeMatched.has(o.key));
@@ -158,31 +157,6 @@ export function proveDeletable(
   return {
     deletable: proven.matched,
     corrupt: [...sized.missing, ...proven.missing],
-    deepEtagSkipped: proven.deepEtagSkipped,
+    sizeOnlyKeys: proven.sizeOnlyKeys,
   };
-}
-
-export async function verify(
-  oldStore: ObjectStore,
-  oldBucket: string,
-  newStore: ObjectStore,
-  newBucket: string,
-  opts: VerifyOptions = {},
-): Promise<VerifyReport> {
-  const oldList = await oldStore.list(oldBucket);
-  const newList = await newStore.list(newBucket);
-  return verifyLists(oldList, newList, opts);
-}
-
-export async function verifyMany(
-  oldStore: ObjectStore,
-  oldBucket: string,
-  newStore: ObjectStore,
-  newBuckets: readonly string[],
-  opts: VerifyOptions = {},
-): Promise<VerifyReport> {
-  const oldList = await oldStore.list(oldBucket);
-  const newList: ListedObject[] = [];
-  for (const b of newBuckets) newList.push(...(await newStore.list(b)));
-  return verifyLists(oldList, newList, opts);
 }

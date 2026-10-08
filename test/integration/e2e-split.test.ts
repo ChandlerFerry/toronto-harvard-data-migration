@@ -4,10 +4,9 @@ import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { S3ObjectStore } from "../../src/adapters/s3ObjectStore.js";
 import { type DestResolver, buildPlan } from "../../src/domain/plan.js";
-import { deleteOld } from "../../src/services/deleteOld.js";
 import { type ReportEnvelope, writeRunReport } from "../../src/services/runReport.js";
+import { deleteOldAgainstBuckets, verifySharded } from "../../src/services/sharded.js";
 import { transfer } from "../../src/services/transfer.js";
-import { verifyMany } from "../../src/services/verify.js";
 import { type LocalStackHandle, startLocalStack } from "../localstack.js";
 import { type SandboxEntry, collectSandboxEntries, seedSandbox } from "../support/seedSandbox.js";
 
@@ -57,12 +56,13 @@ describe("E2E: provider-split migrate -> multi-bucket verify -> guarded delete (
       expect(head.size).toBeGreaterThanOrEqual(0);
     }
 
-    const vr = await verifyMany(store, OLD, store, [...SPLIT_BUCKETS], {
-      plannedKeys: keys,
+    const vr = await verifySharded(store, OLD, store, SPLIT_BUCKETS[0], {
       deep: true,
+      newBuckets: [...SPLIT_BUCKETS],
+      expectBucketByMd5: destFor,
     });
     expect(vr.ok).toBe(true);
-    expect(vr.matched.length).toBe(keys.length);
+    expect(vr.matchedCount).toBe(keys.length);
 
     const dir = await mkdtemp(join(tmpdir(), "e2e-"));
     tmps.push(dir);
@@ -82,8 +82,13 @@ describe("E2E: provider-split migrate -> multi-bucket verify -> guarded delete (
     expect((await readdir(dir)).filter((f) => f.includes("e2e-split")).length).toBe(2);
     expect(written.csvPath).toBeDefined();
 
-    const del = await deleteOld(store, OLD, vr, { dryRun: false, env: {} });
-    expect(del.deleted.length).toBe(keys.length);
+    const del = await deleteOldAgainstBuckets(store, OLD, [...SPLIT_BUCKETS], {
+      dryRun: false,
+      expectBucketByMd5: destFor,
+      env: {},
+    });
+    expect(del.corrupt).toEqual([]);
+    expect(del.deleted).toBe(keys.length);
     expect((await store.list(OLD)).length).toBe(0);
 
     let sum = 0;

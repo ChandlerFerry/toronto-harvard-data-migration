@@ -1,12 +1,9 @@
 import { createHash } from "node:crypto";
 import { beforeEach, describe, expect, it } from "vitest";
-import { ProductionGuardError } from "../../../src/config/guards.js";
-import { bucketName } from "../../../src/config/sources.js";
 import { md5ToKey } from "../../../src/domain/dvcKey.js";
 import { buildPlan, identityResolver } from "../../../src/domain/plan.js";
-import { VerificationGapError, deleteOld } from "../../../src/services/deleteOld.js";
 import { transfer } from "../../../src/services/transfer.js";
-import { verify, verifyMany } from "../../../src/services/verify.js";
+import { type VerifyOptions, verifyLists } from "../../../src/services/verify.js";
 import { FakeObjectStore } from "../../support/fakeObjectStore.js";
 
 const A = "aa11111111111111111111111111111a";
@@ -86,6 +83,23 @@ describe("transfer", () => {
     expect(new TextDecoder().decode(await s.getBytes(NEW, key))).toBe("GOOD");
   });
 
+  it("does not re-copy a same-size destination whose source has a multipart ETag", async () => {
+    const s = new FakeObjectStore();
+    await s.ensureBucket(OLD);
+    await s.ensureBucket(NEW);
+    const key = md5ToKey(A, "v2");
+    await s.put(OLD, key, "big");
+    await s.put(NEW, key, "big");
+    const head = s.head.bind(s);
+    s.head = async (bucket, k) => {
+      const h = await head(bucket, k);
+      return bucket === OLD ? { ...h, etag: `${h.etag}-3` } : h;
+    };
+    const r = await transfer(s, buildPlan(OLD, [key], identityResolver(NEW)));
+    expect(r.copied).toBe(0);
+    expect(r.skipped).toBe(1);
+  });
+
   it("retries a transient copy failure with backoff (no hard error)", async () => {
     const s = new FlakyCopyStore(2);
     await s.ensureBucket(OLD);
@@ -110,6 +124,10 @@ describe("transfer", () => {
   });
 });
 
+async function verify(s: FakeObjectStore, oldB: string, newB: string, opts?: VerifyOptions) {
+  return verifyLists(await s.list(oldB), await s.list(newB), opts);
+}
+
 describe("verify", () => {
   let store: FakeObjectStore;
   let keys: string[];
@@ -121,7 +139,7 @@ describe("verify", () => {
   });
 
   it("passes when NEW matches OLD hash-for-hash", async () => {
-    const report = await verify(store, OLD, store, NEW);
+    const report = await verify(store, OLD, NEW);
     expect(report.ok).toBe(true);
     expect(report.matched.length).toBe(4);
     expect(report.missing).toEqual([]);
@@ -129,20 +147,20 @@ describe("verify", () => {
     expect(report.newCount).toBe(4);
   });
 
-  it("tolerates a v3 destination layout for the same md5", async () => {
+  it("does not accept a v3-layout copy for a v2 key (the client reads the exact key)", async () => {
     const s = new FakeObjectStore();
     await s.ensureBucket(OLD);
     await s.ensureBucket(NEW);
     await s.put(OLD, md5ToKey(A, "v2"), "same");
     await s.put(NEW, md5ToKey(A, "v3"), "same");
-    const report = await verify(s, OLD, s, NEW);
-    expect(report.ok).toBe(true);
-    expect(report.matched).toEqual([md5ToKey(A, "v2")]);
+    const report = await verify(s, OLD, NEW);
+    expect(report.ok).toBe(false);
+    expect(report.missing[0]).toMatchObject({ md5: A, reason: "absent" });
   });
 
   it("reports a missing object and fails when NEW is incomplete", async () => {
     await store.deleteBatch(NEW, [md5ToKey(B, "v2")]);
-    const report = await verify(store, OLD, store, NEW);
+    const report = await verify(store, OLD, NEW);
     expect(report.ok).toBe(false);
     expect(report.missing).toHaveLength(1);
     expect(report.missing[0]!.md5).toBe(B);
@@ -155,8 +173,8 @@ describe("verify", () => {
     const body = "deep-mode-content";
     const md5 = createHash("md5").update(body).digest("hex");
     await s.put(OLD, md5ToKey(md5, "v2"), body);
-    await s.put(NEW, md5ToKey(md5, "v3"), body);
-    const report = await verify(s, OLD, s, NEW, { deep: true });
+    await s.put(NEW, md5ToKey(md5, "v2"), body);
+    const report = await verify(s, OLD, NEW, { deep: true });
     expect(report.ok).toBe(true);
     expect(report.deepChecked).toBe(1);
   });
@@ -170,8 +188,8 @@ describe("verify", () => {
     const key = md5ToKey(md5, "v2");
     await s.put(OLD, key, good);
     await s.put(NEW, key, "BBBB");
-    expect((await verify(s, OLD, s, NEW)).ok).toBe(true);
-    expect((await verify(s, OLD, s, NEW, { deep: true })).ok).toBe(false);
+    expect((await verify(s, OLD, NEW)).ok).toBe(true);
+    expect((await verify(s, OLD, NEW, { deep: true })).ok).toBe(false);
   });
 
   it("deep mode flags a same-size corrupt copy even when an intact same-md5 copy exists", async () => {
@@ -183,89 +201,8 @@ describe("verify", () => {
     await s.put(OLD, md5ToKey(md5, "v2"), good);
     await s.put(NEW, md5ToKey(md5, "v2"), "BAD!");
     await s.put(NEW, md5ToKey(md5, "v3"), good);
-    expect((await verify(s, OLD, s, NEW)).ok).toBe(true);
-    const deep = await verify(s, OLD, s, NEW, { deep: true });
+    expect((await verify(s, OLD, NEW)).ok).toBe(true);
+    const deep = await verify(s, OLD, NEW, { deep: true });
     expect(deep.ok).toBe(false);
-  });
-});
-
-describe("verifyMany (provider split)", () => {
-  it("verifies OLD against the union of several NEW buckets", async () => {
-    const s = new FakeObjectStore();
-    await s.ensureBucket(OLD);
-    await s.put(OLD, md5ToKey(A, "v2"), "a");
-    await s.put(OLD, md5ToKey(B, "v2"), "bb");
-    await s.ensureBucket("nb1");
-    await s.ensureBucket("nb2");
-    await s.put("nb1", md5ToKey(A, "v2"), "a");
-    await s.put("nb2", md5ToKey(B, "v3"), "bb");
-    const r = await verifyMany(s, OLD, s, ["nb1", "nb2"], { deep: true });
-    expect(r.ok).toBe(true);
-    expect(r.matched.length).toBe(2);
-  });
-
-  it("flags an object missing from every NEW bucket", async () => {
-    const s = new FakeObjectStore();
-    await s.ensureBucket(OLD);
-    await s.put(OLD, md5ToKey(A, "v2"), "a");
-    await s.put(OLD, md5ToKey(B, "v2"), "bb");
-    await s.ensureBucket("nb1");
-    await s.put("nb1", md5ToKey(A, "v2"), "a");
-    const r = await verifyMany(s, OLD, s, ["nb1"]);
-    expect(r.ok).toBe(false);
-    expect(r.missing[0]!.md5).toBe(B);
-  });
-});
-
-describe("deleteOld", () => {
-  let store: FakeObjectStore;
-  let keys: string[];
-
-  beforeEach(async () => {
-    store = new FakeObjectStore();
-    keys = await seedOld(store);
-    await transfer(store, buildPlan(OLD, keys, identityResolver(NEW)));
-  });
-
-  it("dry-run (default) deletes nothing but reports targets", async () => {
-    const report = await verify(store, OLD, store, NEW);
-    const del = await deleteOld(store, OLD, report);
-    expect(del.dryRun).toBe(true);
-    expect(del.deleted).toEqual([]);
-    expect(del.targetCount).toBe(4);
-    expect((await store.list(OLD)).length).toBe(4);
-  });
-
-  it("with --no-dry-run removes verified objects from OLD", async () => {
-    const report = await verify(store, OLD, store, NEW);
-    const del = await deleteOld(store, OLD, report, { dryRun: false });
-    expect(del.dryRun).toBe(false);
-    expect(del.deleted.sort()).toEqual([...keys].sort());
-    expect((await store.list(OLD)).length).toBe(0);
-    expect((await store.list(NEW)).length).toBe(4);
-  });
-
-  it("ABORTS (throws) when verification has any gap — never deletes unverified", async () => {
-    await store.deleteBatch(NEW, [md5ToKey(B, "v2")]);
-    const report = await verify(store, OLD, store, NEW);
-    await expect(deleteOld(store, OLD, report, { dryRun: false })).rejects.toBeInstanceOf(
-      VerificationGapError,
-    );
-    expect((await store.list(OLD)).length).toBe(4);
-  });
-
-  it("refuses to delete from a production-named bucket even when fully verified", async () => {
-    const prod = bucketName("coinout", "us-east-2");
-    await store.ensureBucket(prod);
-
-    await store.put(prod, md5ToKey(A, "v2"), "alpha");
-    await store.put(prod, md5ToKey(B, "v2"), "beta-content");
-    await store.put(prod, md5ToKey(C, "v2"), "gamma");
-    await store.put(prod, md5ToKey(DIR, "v2"), '{"files":[]}');
-    const report = await verify(store, prod, store, NEW);
-    expect(report.ok).toBe(true);
-    await expect(deleteOld(store, prod, report, { dryRun: false, env: {} })).rejects.toBeInstanceOf(
-      ProductionGuardError,
-    );
   });
 });

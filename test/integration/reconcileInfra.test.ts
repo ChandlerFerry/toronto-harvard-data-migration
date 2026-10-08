@@ -1,7 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { ACCOUNTS, SOURCES, bucketForSource } from "../../src/config/sources.js";
+import { ACCOUNTS, SOURCES, bucketName } from "../../src/config/sources.js";
 
 const INFRA_DIR = process.env.TRACKER_INFRA_DIR ?? join(process.cwd(), "..", "tracker-infra");
 const LIVE = join(INFRA_DIR, "live", "harvard-oi-econ-tracker");
@@ -44,7 +44,7 @@ describe.skipIf(!HAS_INFRA)("IaC reconciliation with tracker-infra (Terragrunt)"
     for (const region of ["us-east-1", "us-east-2"] as const) {
       const pfx = prefix(region);
       for (const source of SOURCES) {
-        expect(bucketForSource(source, region)).toBe(`${pfx}-${source}-${acct}-${region}-an`);
+        expect(bucketName(source, region)).toBe(`${pfx}-${source}-${acct}-${region}-an`);
       }
     }
   });

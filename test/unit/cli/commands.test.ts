@@ -7,13 +7,13 @@ import {
   makeDeleteCommand,
   makeMapCommand,
   makeMigrateCommand,
-  makeUpgradeCommand,
+  makeRepointCommand,
   makeVerifyCommand,
 } from "../../../src/cli/commands.js";
 import { bucketName } from "../../../src/config/sources.js";
 import { md5ToKey } from "../../../src/domain/dvcKey.js";
 import type { GitDvcEntry, GitHistory } from "../../../src/ports/gitHistory.js";
-import type { UpgradeAllDeps } from "../../../src/services/upgrade.js";
+import type { RepointDeps } from "../../../src/services/repoint.js";
 import { FakeObjectStore } from "../../support/fakeObjectStore.js";
 
 const A = "aa11111111111111111111111111111a";
@@ -86,7 +86,7 @@ afterEach(async () => {
 });
 
 describe("dvc-migrate (provider-split, memory-sharded, deep — the only path)", () => {
-  it("scatters the monolith into per-provider buckets (unmatched -> public)", async () => {
+  it("scatters the monolith into per-provider buckets, leaving unreferenced objects in OLD", async () => {
     const store = new FakeObjectStore();
     await store.ensureBucket("old-remote");
     await store.put("old-remote", md5ToKey(A, "v2"), "alpha");
@@ -105,11 +105,59 @@ describe("dvc-migrate (provider-split, memory-sharded, deep — the only path)",
 
     expect((await store.list(AFFINITY)).map((o) => o.key)).toEqual([md5ToKey(A, "v2")]);
     expect((await store.list(COINOUT)).map((o) => o.key)).toEqual([md5ToKey(B, "v2")]);
-    expect((await store.list(PUBLIC)).map((o) => o.key)).toEqual([md5ToKey(C, "v2")]);
+    let inPublic = 0;
+    try {
+      inPublic = (await store.list(PUBLIC)).length;
+    } catch {}
+    expect(inPublic).toBe(0);
     const { summary } = await readReport(dir);
-    expect(summary.copied).toBe(3);
+    expect(summary.copied).toBe(2);
+    expect(summary.unreferencedSkipped).toBe(1);
     expect(summary.verifyOk).toBe(true);
     expect(process.exitCode).toBe(0);
+  });
+
+  it("--allow-unreferenced routes objects no .dvc references to public", async () => {
+    const store = new FakeObjectStore();
+    await store.ensureBucket("old-remote");
+    await store.put("old-remote", md5ToKey(A, "v2"), "alpha");
+    await store.put("old-remote", md5ToKey(C, "v2"), "gamma");
+    const dir = await tmpDir();
+
+    await makeMigrateCommand(makeDeps(store, dir, fakeGit(PROVIDERS))).parseAsync([
+      "node",
+      "dvc-migrate",
+      "--old",
+      "old-remote",
+      "--git-repo",
+      "/repo",
+      "--allow-unreferenced",
+    ]);
+
+    expect((await store.list(PUBLIC)).map((o) => o.key)).toEqual([md5ToKey(C, "v2")]);
+    const { summary } = await readReport(dir);
+    expect(summary.copied).toBe(2);
+    expect(summary.unreferencedSkipped).toBe(0);
+    expect(process.exitCode).toBe(0);
+  });
+
+  it("does not abort on a .dir absent from OLD; its unrouted members stay in OLD", async () => {
+    const DIR = "dd55555555555555555555555555555d.dir";
+    const store = new FakeObjectStore();
+    await store.ensureBucket("old-remote");
+    await store.put("old-remote", md5ToKey(A, "v2"), "alpha");
+    await store.put("old-remote", md5ToKey(C, "v2"), "member-of-missing-dir");
+    const dir = await tmpDir();
+
+    await makeMigrateCommand(
+      makeDeps(store, dir, fakeGit([entry(A, "Affinity"), entry(DIR, "CoinOut")])),
+    ).parseAsync(["node", "dvc-migrate", "--old", "old-remote", "--git-repo", "/repo"]);
+
+    expect(process.exitCode).toBe(0);
+    expect((await store.list(AFFINITY)).map((o) => o.key)).toEqual([md5ToKey(A, "v2")]);
+    const { summary } = await readReport(dir);
+    expect(summary.missingDirs).toBe(1);
+    expect(summary.unreferencedSkipped).toBe(1);
   });
 
   it("aborts (exit 1) on a provider conflict, copying nothing", async () => {
@@ -220,7 +268,8 @@ describe("dvc-verify (provider-split union gate)", () => {
     expect(process.exitCode).toBe(0);
     const { summary } = await readReport(dir);
     expect(summary.ok).toBe(true);
-    expect(summary.matched).toBe(3);
+    expect(summary.matched).toBe(2);
+    expect(summary.unreferencedSkipped).toBe(1);
   });
 
   it("fails (exit 1) when an object is missing from every provider bucket", async () => {
@@ -269,11 +318,13 @@ describe("dvc-delete safety (provider-split)", () => {
     await seedMigrated(store);
     const dir = await tmpDir();
 
-    await makeDeleteCommand(makeDeps(store, dir)).parseAsync([
+    await makeDeleteCommand(makeDeps(store, dir, fakeGit(PROVIDERS))).parseAsync([
       "node",
       "dvc-delete",
       "--old",
       "old-remote",
+      "--git-repo",
+      "/repo",
       "--no-dry-run",
     ]);
 
@@ -293,11 +344,13 @@ describe("dvc-delete safety (provider-split)", () => {
     await store.put(AFFINITY, md5ToKey(A, "v2"), "alpha");
     const dir = await tmpDir();
 
-    await makeDeleteCommand(makeDeps(store, dir)).parseAsync([
+    await makeDeleteCommand(makeDeps(store, dir, fakeGit(PROVIDERS))).parseAsync([
       "node",
       "dvc-delete",
       "--old",
       "old-remote",
+      "--git-repo",
+      "/repo",
       "--no-dry-run",
     ]);
 
@@ -314,11 +367,13 @@ describe("dvc-delete safety (provider-split)", () => {
     await store.put(AFFINITY, md5ToKey(A, "v2"), "BAD!");
     const dir = await tmpDir();
 
-    await makeDeleteCommand(makeDeps(store, dir)).parseAsync([
+    await makeDeleteCommand(makeDeps(store, dir, fakeGit(PROVIDERS))).parseAsync([
       "node",
       "dvc-delete",
       "--old",
       "old-remote",
+      "--git-repo",
+      "/repo",
       "--no-dry-run",
     ]);
 
@@ -382,11 +437,13 @@ describe("dvc-delete safety (provider-split)", () => {
     await store.put(AFFINITY, md5ToKey(A, "v2"), "alpha");
     const dir = await tmpDir();
 
-    await makeDeleteCommand(makeDeps(store, dir)).parseAsync([
+    await makeDeleteCommand(makeDeps(store, dir, fakeGit(PROVIDERS))).parseAsync([
       "node",
       "dvc-delete",
       "--old",
       OLD,
+      "--git-repo",
+      "/repo",
       "--no-dry-run",
     ]);
 
@@ -395,7 +452,27 @@ describe("dvc-delete safety (provider-split)", () => {
     expect((await readReport(dir)).summary.aborted).toBe(true);
   });
 
-  it("--help documents the dry-run safety flags and the optional misroute gate", () => {
+  it("REFUSES --no-dry-run without --git-repo (misroute gate is mandatory for real deletes)", async () => {
+    const store = new FakeObjectStore();
+    await seedMigrated(store);
+    const dir = await tmpDir();
+
+    await makeDeleteCommand(makeDeps(store, dir)).parseAsync([
+      "node",
+      "dvc-delete",
+      "--old",
+      "old-remote",
+      "--no-dry-run",
+    ]);
+
+    expect(process.exitCode).toBe(1);
+    expect((await store.list("old-remote")).length).toBe(3);
+    const { summary } = await readReport(dir);
+    expect(summary.aborted).toBe(true);
+    expect(summary.reason).toMatch(/--git-repo/);
+  });
+
+  it("--help documents the dry-run safety flags and the misroute gate", () => {
     const help = makeDeleteCommand(makeDeps(new FakeObjectStore(), ".")).helpInformation();
     expect(help).toContain("--no-dry-run");
     expect(help).toContain("--allow-production");
@@ -472,13 +549,15 @@ describe("incremental --provider scoping (single-provider migrate/verify/delete)
     await seedMigrated(store);
     const dir = await tmpDir();
 
-    await makeDeleteCommand(makeDeps(store, dir)).parseAsync([
+    await makeDeleteCommand(makeDeps(store, dir, fakeGit(PROVIDERS))).parseAsync([
       "node",
       "dvc-delete",
       "--old",
       "old-remote",
       "--provider",
       "coinout",
+      "--git-repo",
+      "/repo",
       "--no-dry-run",
     ]);
 
@@ -654,16 +733,14 @@ describe("fail-closed routing gate (unknown dirs + corrupt .dir)", () => {
   });
 });
 
-describe("dvc-upgrade (v2 -> v3 .dvc upgrade, repo plane)", () => {
-  const P_V2 = "/repo/data/dvc/ACS 2014-2018 5-Year County/a.zip.dvc";
-  const P_V3 = "/repo/data/dvc/UI Claims/raw.dvc";
-  const P_V1 = "/repo/data/dvc/Kronos/c.csv.dvc";
+describe("dvc-repoint (per-out remote: field, repo plane)", () => {
+  const P_PUB = "/repo/data/dvc/ACS 2014-2018 5-Year County/a.zip.dvc";
+  const P_KRONOS = "/repo/data/dvc/Kronos/k.zip.dvc";
+  const P_MYSTERY = "/repo/data/dvc/Mystery Source/m.dvc";
   const v2 = "outs:\n- md5: f7e27dd28eccf234f317305238aa2634\n  size: 703808\n  path: a.zip\n";
-  const v3 =
-    "outs:\n- md5: d1610f687869443d839157676f60abb9.dir\n  size: 10\n  nfiles: 5\n  path: raw\n  hash: md5\n";
   const v1 = `md5: deadbeef\nouts:\n- md5: ${C}\n  path: c.csv\n`;
 
-  function upgradeDeps(files: Map<string, string>): UpgradeAllDeps {
+  function repointDeps(files: Map<string, string>): RepointDeps {
     return {
       listDvcFiles: () => Promise.resolve([...files.keys()]),
       readFile: (p) => Promise.resolve(files.get(p) ?? ""),
@@ -675,106 +752,117 @@ describe("dvc-upgrade (v2 -> v3 .dvc upgrade, repo plane)", () => {
   }
   const depsWith = (files: Map<string, string>, reportDir: string): CliDeps => ({
     ...makeDeps(new FakeObjectStore(), reportDir),
-    upgrade: upgradeDeps(files),
+    repoint: repointDeps(files),
   });
+  const run = (files: Map<string, string>, dir: string, ...args: string[]) =>
+    makeRepointCommand(depsWith(files, dir)).parseAsync([
+      "node",
+      "dvc-repoint",
+      "--git-repo",
+      "/repo",
+      ...args,
+    ]);
 
-  it("upgrades v2, skips v3, writes the files, and reports the change set", async () => {
+  it("sets remote: <provider> on each .dvc WITHOUT touching the hash format", async () => {
     const files = new Map([
-      [P_V2, v2],
-      [P_V3, v3],
+      [P_PUB, v2],
+      [P_KRONOS, v2],
     ]);
     const dir = await tmpDir();
 
-    await makeUpgradeCommand(depsWith(files, dir)).parseAsync([
-      "node",
-      "dvc-upgrade",
-      "--git-repo",
-      "/repo",
-    ]);
+    await run(files, dir);
 
+    expect(files.get(P_PUB)).toMatch(/remote: public/);
+    expect(files.get(P_KRONOS)).toMatch(/remote: kronos/);
+    expect(files.get(P_KRONOS)).not.toMatch(/hash:/);
     const { summary, rows } = await readReport(dir);
-    expect(summary.upgraded).toBe(1);
-    expect(summary.alreadyV3).toBe(1);
-    expect(summary.errors).toBe(0);
-    expect(files.get(P_V2)).toMatch(/hash: md5/);
-    expect(rows?.some((r) => r.key === P_V2 && r.status === "upgraded-v3")).toBe(true);
+    expect(summary.repointed).toBe(2);
+    expect(rows?.some((r) => r.key === P_KRONOS && r.status === "repointed:kronos")).toBe(true);
     expect(process.exitCode).toBe(0);
   });
 
+  it("is idempotent: a second run reports already-repointed and writes nothing new", async () => {
+    const files = new Map([[P_KRONOS, v2]]);
+    const dir = await tmpDir();
+    await run(files, dir);
+    const after = files.get(P_KRONOS);
+    await rm(dir, { recursive: true, force: true });
+    const dir2 = await tmpDir();
+
+    await run(files, dir2);
+
+    expect(files.get(P_KRONOS)).toBe(after);
+    expect((await readReport(dir2)).summary.already).toBe(1);
+  });
+
   it("--dry-run reports without writing any .dvc", async () => {
-    const files = new Map([[P_V2, v2]]);
+    const files = new Map([[P_KRONOS, v2]]);
     const dir = await tmpDir();
 
-    await makeUpgradeCommand(depsWith(files, dir)).parseAsync([
-      "node",
-      "dvc-upgrade",
-      "--git-repo",
-      "/repo",
-      "--dry-run",
-    ]);
+    await run(files, dir, "--dry-run");
 
-    expect(files.get(P_V2)).toBe(v2);
+    expect(files.get(P_KRONOS)).toBe(v2);
     expect((await readReport(dir)).summary.dryRun).toBe(true);
     expect(process.exitCode).toBe(0);
   });
 
-  it("--provider scopes the upgrade to that provider's folder(s), leaving others untouched", async () => {
-    const K_V2 = "/repo/data/dvc/Kronos/k.zip.dvc";
+  it("--provider scopes the repoint to that provider's folder(s), leaving others untouched", async () => {
     const files = new Map([
-      [P_V2, v2], // ACS … → public: out of scope
-      [K_V2, v2],
+      [P_PUB, v2],
+      [P_KRONOS, v2],
     ]);
     const dir = await tmpDir();
 
-    await makeUpgradeCommand(depsWith(files, dir)).parseAsync([
-      "node",
-      "dvc-upgrade",
-      "--git-repo",
-      "/repo",
-      "--provider",
-      "kronos",
-    ]);
+    await run(files, dir, "--provider", "kronos");
 
+    expect(files.get(P_KRONOS)).toMatch(/remote: kronos/);
+    expect(files.get(P_PUB)).toBe(v2);
     const { summary } = await readReport(dir);
     expect(summary.provider).toBe("kronos");
-    expect(summary.upgraded).toBe(1);
-    expect(files.get(K_V2)).toMatch(/hash: md5/);
-    expect(files.get(P_V2)).toBe(v2);
-    expect(process.exitCode).toBe(0);
+    expect(summary.repointed).toBe(1);
   });
 
   it("--provider rejects an unknown stub (exit 1, abort report, nothing written)", async () => {
-    const files = new Map([[P_V2, v2]]);
+    const files = new Map([[P_KRONOS, v2]]);
     const dir = await tmpDir();
 
-    await makeUpgradeCommand(depsWith(files, dir)).parseAsync([
-      "node",
-      "dvc-upgrade",
-      "--git-repo",
-      "/repo",
-      "--provider",
-      "nope",
-    ]);
+    await run(files, dir, "--provider", "nope");
 
     expect(process.exitCode).toBe(1);
     expect((await readReport(dir)).summary.aborted).toBe(true);
-    expect(files.get(P_V2)).toBe(v2);
+    expect(files.get(P_KRONOS)).toBe(v2);
   });
 
-  it("fails loud (exit 1) and records a v1 .dvc as an error", async () => {
-    const files = new Map([[P_V1, v1]]);
+  it("refuses a folder absent from the provider map unless --allow-unknown-dirs", async () => {
+    const files = new Map([[P_MYSTERY, v2]]);
     const dir = await tmpDir();
 
-    await makeUpgradeCommand(depsWith(files, dir)).parseAsync([
-      "node",
-      "dvc-upgrade",
-      "--git-repo",
-      "/repo",
-    ]);
+    await run(files, dir);
 
-    const { summary, rows } = await readReport(dir);
+    expect(process.exitCode).toBe(1);
+    expect(files.get(P_MYSTERY)).toBe(v2);
+    const { rows } = await readReport(dir);
+    expect(rows?.[0]?.status).toMatch(/^error:.*Mystery Source/);
+  });
+
+  it("--allow-unknown-dirs points an unknown folder at public (matching migrate's routing)", async () => {
+    const files = new Map([[P_MYSTERY, v2]]);
+    const dir = await tmpDir();
+
+    await run(files, dir, "--allow-unknown-dirs");
+
+    expect(files.get(P_MYSTERY)).toMatch(/remote: public/);
+    expect(process.exitCode).toBe(0);
+  });
+
+  it("fails loud (exit 1) and records an unsupported .dvc as an error", async () => {
+    const files = new Map([["/repo/data/dvc/Kronos/c.csv.dvc", v1]]);
+    const dir = await tmpDir();
+
+    await run(files, dir);
+
+    const { summary } = await readReport(dir);
     expect(summary.errors).toBe(1);
-    expect(rows?.some((r) => r.key === P_V1 && r.status.startsWith("error"))).toBe(true);
     expect(process.exitCode).toBe(1);
   });
 });

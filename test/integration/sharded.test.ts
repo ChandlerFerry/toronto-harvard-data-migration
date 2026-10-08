@@ -1,6 +1,10 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { S3ObjectStore } from "../../src/adapters/s3ObjectStore.js";
-import { deleteOldSharded, migrateSharded, verifySharded } from "../../src/services/sharded.js";
+import {
+  deleteOldAgainstBuckets,
+  migrateSharded,
+  verifySharded,
+} from "../../src/services/sharded.js";
 import { type LocalStackHandle, startLocalStack } from "../localstack.js";
 import { type SandboxEntry, collectSandboxEntries, seedSandbox } from "../support/seedSandbox.js";
 
@@ -44,7 +48,7 @@ describe("Sharded pipeline on real S3 ListObjectsV2 (LocalStack)", () => {
     expect(vr.ok).toBe(true);
     expect(vr.matchedCount).toBe(entries.length);
 
-    const del = await deleteOldSharded(store, OLD, NEW, {
+    const del = await deleteOldAgainstBuckets(store, OLD, [NEW], {
       shardLength: 2,
       dryRun: false,
       env: {},

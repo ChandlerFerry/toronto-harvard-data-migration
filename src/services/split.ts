@@ -61,27 +61,48 @@ export function buildSplitMapping(input: BuildSplitMappingInput): SplitMapping {
 export interface ExpandDirResult {
   members: Record<string, string[]>;
 
+  missingDirs: string[];
+
   dirReadErrors: DirReadError[];
 }
 
+function isNotFound(err: unknown): boolean {
+  const name = (err as { name?: string })?.name ?? "";
+  if (name === "NoSuchKey" || name === "NotFound") return true;
+  return /^NoSuchKey\b/.test(err instanceof Error ? err.message : String(err));
+}
+
+// A .dir absent under both layouts was never pushed: its members stay unrouted and
+// the unreferenced gate keeps them in OLD. Any other failure is fatal (dirReadErrors).
 export async function expandDirMembers(
   store: ObjectStore,
   bucket: string,
   dirMd5s: readonly string[],
 ): Promise<ExpandDirResult> {
   const members: Record<string, string[]> = {};
+  const missingDirs: string[] = [];
   const dirReadErrors: DirReadError[] = [];
 
-  for (const dirMd5 of dirMd5s) {
+  for (const dirMd5 of new Set(dirMd5s)) {
     let bytes: Uint8Array | undefined;
+    let error: string | undefined;
     for (const layout of ["v3", "v2"] as const) {
       try {
         bytes = await store.getBytes(bucket, md5ToKey(dirMd5, layout));
         break;
-      } catch {}
+      } catch (err) {
+        if (!isNotFound(err)) {
+          error = (err as Error).message;
+          break;
+        }
+      }
+    }
+    if (error !== undefined) {
+      dirReadErrors.push({ dirMd5, error });
+      continue;
     }
     if (bytes === undefined) {
-      dirReadErrors.push({ dirMd5, error: "not found under v2 or v3 layout" });
+      missingDirs.push(dirMd5);
       continue;
     }
     try {
@@ -91,5 +112,5 @@ export async function expandDirMembers(
     }
   }
 
-  return { members, dirReadErrors };
+  return { members, missingDirs, dirReadErrors };
 }

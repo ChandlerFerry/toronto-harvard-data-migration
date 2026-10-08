@@ -4,7 +4,7 @@ import {
   makeDeleteCommand,
   makeMapCommand,
   makeMigrateCommand,
-  makeUpgradeCommand,
+  makeRepointCommand,
   makeVerifyCommand,
 } from "./commands.js";
 import { defaultDeps } from "./env.js";
@@ -18,7 +18,7 @@ new Command("dvcm")
   .addCommand(makeVerifyCommand(deps).name("verify"))
   .addCommand(makeDeleteCommand(deps).name("delete"))
   .addCommand(makeMapCommand(deps).name("map"))
-  .addCommand(makeUpgradeCommand(deps).name("upgrade"))
+  .addCommand(makeRepointCommand(deps).name("repoint"))
   .parseAsync(process.argv)
   .catch((err: unknown) => {
     console.error(err instanceof Error ? err.message : err);

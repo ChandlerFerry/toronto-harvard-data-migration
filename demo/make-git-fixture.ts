@@ -4,7 +4,7 @@ import { execFileSync } from "node:child_process";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { storeFromEnv } from "../src/cli/env.js";
-import { tryKeyToMd5 } from "../src/domain/dvcKey.js";
+import { V3_PREFIX, tryKeyToMd5 } from "../src/domain/dvcKey.js";
 
 const DEFAULT_PROVIDERS = ["Affinity", "CoinOut", "Earnin", "Intuit", "Kronos"];
 
@@ -35,6 +35,10 @@ async function main(): Promise<void> {
     ),
   ].sort();
   if (leaves.length === 0) throw new Error(`no leaf DVC objects found in s3://${oldBucket}`);
+  // A real .dvc carries `hash: md5` exactly when DVC 3 pushed its object under files/md5/.
+  const v3Md5s = new Set(
+    listed.filter((o) => o.key.startsWith(V3_PREFIX)).map((o) => tryKeyToMd5(o.key)),
+  );
 
   const byProvider = new Map<string, string[]>();
   for (const p of providers) byProvider.set(p, []);
@@ -54,18 +58,16 @@ async function main(): Promise<void> {
 
   let totalOuts = 0;
   let v2Count = 0;
-  let i = 0;
   for (const [provider, md5s] of byProvider) {
     if (md5s.length === 0) continue;
     const dir = join(outDir, subdir, provider);
     await mkdir(dir, { recursive: true });
     for (const md5 of md5s) {
-      const isV3 = i % 3 === 0;
+      const isV3 = v3Md5s.has(md5);
       if (!isV3) v2Count += 1;
       const out = `outs:\n- md5: ${md5}\n  path: ${md5}.bin${isV3 ? "\n  hash: md5" : ""}\n`;
       await writeFile(join(dir, `${md5}.bin.dvc`), out);
       totalOuts += 1;
-      i += 1;
     }
   }
   git("add", "-A");
@@ -76,8 +78,8 @@ async function main(): Promise<void> {
     [
       `git fixture: ${outDir}`,
       `  ${totalOuts} leaf md5s across ${providers.length} providers (${summary})`,
-      `  .dvc format: ${v2Count} v2 (upgradable) + ${totalOuts - v2Count} v3 (already current)`,
-      "  .dir objects left unreferenced -> route to public",
+      `  .dvc format: ${v2Count} v2 (legacy key layout) + ${totalOuts - v2Count} v3 (files/md5/ layout)`,
+      "  .dir objects left unreferenced -> stay in OLD (migrate --allow-unreferenced routes them to public)",
       "",
     ].join("\n"),
   );

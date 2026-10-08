@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { md5ToKey } from "../../../src/domain/dvcKey.js";
 import type { ListedObject, ObjectStore } from "../../../src/ports/objectStore.js";
-import { verify } from "../../../src/services/verify.js";
+import { verifyLists } from "../../../src/services/verify.js";
 
 const M = "aa11111111111111111111111111111a";
 const PLAIN_MD5_A = "0123456789abcdef0123456789abcdef";
@@ -21,13 +21,17 @@ function listStore(buckets: Record<string, ListedObject[]>): ObjectStore {
   } as unknown as ObjectStore;
 }
 
+async function verify(store: ObjectStore, opts?: { deep?: boolean }) {
+  return verifyLists(await store.list("old"), await store.list("new"), opts);
+}
+
 describe("deep verify — multipart ETag tolerance (C2)", () => {
   it("does NOT flag a multipart-source object whose copy has a single-part ETag", async () => {
     const store = listStore({
       old: [{ key: md5ToKey(M, "v2"), size: 100, etag: COMPOSITE }],
-      new: [{ key: md5ToKey(M, "v3"), size: 100, etag: PLAIN_MD5_A }],
+      new: [{ key: md5ToKey(M, "v2"), size: 100, etag: PLAIN_MD5_A }],
     });
-    const r = await verify(store, "old", store, "new", { deep: true });
+    const r = await verify(store, { deep: true });
     expect(r.ok).toBe(true);
     expect(r.matched.length).toBe(1);
     expect(r.deepEtagSkipped).toBe(1);
@@ -38,7 +42,7 @@ describe("deep verify — multipart ETag tolerance (C2)", () => {
       old: [{ key: md5ToKey(M, "v2"), size: 100, etag: PLAIN_MD5_A }],
       new: [{ key: md5ToKey(M, "v2"), size: 100, etag: PLAIN_MD5_B }],
     });
-    const r = await verify(store, "old", store, "new", { deep: true });
+    const r = await verify(store, { deep: true });
     expect(r.ok).toBe(false);
     expect(r.missing).toHaveLength(1);
   });
@@ -48,7 +52,7 @@ describe("deep verify — multipart ETag tolerance (C2)", () => {
       old: [{ key: md5ToKey(M, "v2"), size: 100, etag: PLAIN_MD5_A }],
       new: [{ key: md5ToKey(M, "v2"), size: 100, etag: PLAIN_MD5_B }],
     });
-    const r = await verify(store, "old", store, "new", { deep: true });
+    const r = await verify(store, { deep: true });
     expect(r.missing).toHaveLength(1);
     const m = r.missing[0]!;
     expect(m.reason).toBe("etag-mismatch");
@@ -60,9 +64,9 @@ describe("deep verify — multipart ETag tolerance (C2)", () => {
   it("byte-verifies matching single-part ETags (deepEtagSkipped stays 0)", async () => {
     const store = listStore({
       old: [{ key: md5ToKey(M, "v2"), size: 100, etag: PLAIN_MD5_A }],
-      new: [{ key: md5ToKey(M, "v3"), size: 100, etag: PLAIN_MD5_A }],
+      new: [{ key: md5ToKey(M, "v2"), size: 100, etag: PLAIN_MD5_A }],
     });
-    const r = await verify(store, "old", store, "new", { deep: true });
+    const r = await verify(store, { deep: true });
     expect(r.ok).toBe(true);
     expect(r.deepEtagSkipped).toBe(0);
   });
@@ -72,7 +76,7 @@ describe("deep verify — multipart ETag tolerance (C2)", () => {
       old: [{ key: md5ToKey(M, "v2"), size: 100, etag: PLAIN_MD5_A }],
       new: [{ key: md5ToKey(M, "v2"), size: 100, etag: "" }],
     });
-    const r = await verify(store, "old", store, "new", { deep: true });
+    const r = await verify(store, { deep: true });
     expect(r.ok).toBe(false);
     expect(r.missing).toHaveLength(1);
     expect(r.missing[0]!.reason).toBe("etag-mismatch");
@@ -81,9 +85,9 @@ describe("deep verify — multipart ETag tolerance (C2)", () => {
   it("does NOT silently trust size when the OLD listing omits the ETag but NEW is verifiable", async () => {
     const store = listStore({
       old: [{ key: md5ToKey(M, "v2"), size: 100, etag: "" }],
-      new: [{ key: md5ToKey(M, "v3"), size: 100, etag: PLAIN_MD5_A }],
+      new: [{ key: md5ToKey(M, "v2"), size: 100, etag: PLAIN_MD5_A }],
     });
-    const r = await verify(store, "old", store, "new", { deep: true });
+    const r = await verify(store, { deep: true });
     expect(r.ok).toBe(false);
     expect(r.missing).toHaveLength(1);
     expect(r.missing[0]!.reason).toBe("etag-mismatch");
@@ -94,9 +98,9 @@ describe("deep verify — multipart ETag tolerance (C2)", () => {
   it("tolerates a missing OLD ETag when NEW carries only a composite (multipart) ETag", async () => {
     const store = listStore({
       old: [{ key: md5ToKey(M, "v2"), size: 100, etag: "" }],
-      new: [{ key: md5ToKey(M, "v3"), size: 100, etag: COMPOSITE }],
+      new: [{ key: md5ToKey(M, "v2"), size: 100, etag: COMPOSITE }],
     });
-    const r = await verify(store, "old", store, "new", { deep: true });
+    const r = await verify(store, { deep: true });
     expect(r.ok).toBe(true);
     expect(r.matched).toHaveLength(1);
     expect(r.deepEtagSkipped).toBe(1);

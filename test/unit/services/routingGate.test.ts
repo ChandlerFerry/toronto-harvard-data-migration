@@ -2,8 +2,11 @@ import { describe, expect, it } from "vitest";
 import { bucketName } from "../../../src/config/sources.js";
 import { md5ToKey } from "../../../src/domain/dvcKey.js";
 import type { GitDvcEntry } from "../../../src/ports/gitHistory.js";
-import { VerificationGapError } from "../../../src/services/deleteOld.js";
-import { deleteOldSharded, migrateSharded, verifySharded } from "../../../src/services/sharded.js";
+import {
+  deleteOldAgainstBuckets,
+  migrateSharded,
+  verifySharded,
+} from "../../../src/services/sharded.js";
 import { buildSplitMapping } from "../../../src/services/split.js";
 import { FakeObjectStore } from "../../support/fakeObjectStore.js";
 
@@ -92,7 +95,7 @@ describe("predictBucket / destination assertion (Phase C)", () => {
     expect(gap?.foundBuckets).toEqual([B("public")]);
   });
 
-  it("delete REFUSES (throws) when an object is misrouted — OLD is not destroyed", async () => {
+  it("delete REFUSES a misrouted object — OLD is not destroyed", async () => {
     const store = new FakeObjectStore();
     await store.ensureBucket("old");
     await store.put("old", md5ToKey(EARNIN, "v2"), "payroll");
@@ -100,14 +103,12 @@ describe("predictBucket / destination assertion (Phase C)", () => {
     await store.put(B("public"), md5ToKey(EARNIN, "v2"), "payroll");
 
     const split = buildSplitMapping({ gitEntries: [entry(EARNIN, "Earnin")], region: "us-east-2" });
-    await expect(
-      deleteOldSharded(store, "old", B("public"), {
-        deep: true,
-        dryRun: false,
-        newBuckets: split.destBuckets,
-        expectBucketByMd5: split.predictBucket,
-      }),
-    ).rejects.toBeInstanceOf(VerificationGapError);
+    const del = await deleteOldAgainstBuckets(store, "old", split.destBuckets, {
+      dryRun: false,
+      expectBucketByMd5: split.predictBucket,
+    });
+    expect(del.deleted).toBe(0);
+    expect(del.corrupt.map((m) => m.reason)).toEqual(["misrouted"]);
     expect((await store.list("old")).length).toBe(1);
   });
 });

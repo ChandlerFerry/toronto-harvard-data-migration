@@ -74,11 +74,22 @@ describe("expandDirMembers", () => {
     expect(result.dirReadErrors).toEqual([]);
   });
 
-  it("records a dir-read error for a .dir hash absent from the store instead of throwing", async () => {
+  it("reports a .dir absent under both layouts as missing (non-fatal), not as a read error", async () => {
     const store = new FakeObjectStore();
     await store.ensureBucket("old");
-    const result = await expandDirMembers(store, "old", [D]);
+    const result = await expandDirMembers(store, "old", [D, D]);
     expect(result.members).toEqual({});
+    expect(result.missingDirs).toEqual([D]);
+    expect(result.dirReadErrors).toEqual([]);
+  });
+
+  it("records a non-NotFound failure (e.g. AccessDenied) as a dir-read error, not as missing", async () => {
+    const store = new FakeObjectStore();
+    await store.ensureBucket("old");
+    store.getBytes = () =>
+      Promise.reject(Object.assign(new Error("denied"), { name: "AccessDenied" }));
+    const result = await expandDirMembers(store, "old", [D]);
+    expect(result.missingDirs).toEqual([]);
     expect(result.dirReadErrors.map((e) => e.dirMd5)).toEqual([D]);
   });
 });

@@ -20,12 +20,7 @@ export const ACCOUNTS = {
   new: "305901448049",
 } as const;
 
-export const REGIONS = {
-  permanent: "us-east-1",
-  ohio: "us-east-2",
-} as const;
-
-export type Region = (typeof REGIONS)[keyof typeof REGIONS];
+export type Region = "us-east-1" | "us-east-2";
 
 export const BUCKET_PREFIX = "dvc";
 
@@ -38,11 +33,3 @@ export function bucketName(stub: string, region: Region): string {
 export function isSource(value: string): value is Source {
   return (SOURCES as readonly string[]).includes(value);
 }
-
-export function bucketForSource(source: Source, region: Region): string {
-  return bucketName(source, region);
-}
-
-export const LEGACY_SOURCE_BUCKET_DEFAULT = "oi-economictracker-dvc";
-
-export const SANDBOX_BUCKET = "oi-example-dvc-s3-remote";

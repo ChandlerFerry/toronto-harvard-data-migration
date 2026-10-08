@@ -8,8 +8,6 @@ export interface TransferOptions {
   concurrency?: number;
   onProgress?: (done: number, total: number) => void;
 
-  ensureBuckets?: boolean;
-
   maxRetries?: number;
 
   retry?: Partial<RetryOptions>;
@@ -24,10 +22,10 @@ export interface TransferReport {
   total: number;
   copied: number;
   skipped: number;
-  copiedKeys: string[];
-  skippedKeys: string[];
   errors: TransferError[];
 }
+
+const SINGLE_PART_ETAG = /^[0-9a-f]{32}$/i;
 
 async function destMatchesSource(store: ObjectStore, item: PlanItem): Promise<boolean> {
   let dst: { size: number; etag: string };
@@ -38,7 +36,12 @@ async function destMatchesSource(store: ObjectStore, item: PlanItem): Promise<bo
   }
   try {
     const src = await store.head(item.sourceBucket, item.sourceKey);
-    return src.etag !== "" && src.size === dst.size && src.etag === dst.etag;
+    if (src.etag === "" || src.size !== dst.size) return false;
+    // ponytail: multipart ETags depend on part size, so they never match across a copy;
+    // size is the resume check there, and delete refuses size-only proofs by default.
+    return (
+      !SINGLE_PART_ETAG.test(src.etag) || !SINGLE_PART_ETAG.test(dst.etag) || src.etag === dst.etag
+    );
   } catch {
     return false;
   }
@@ -51,13 +54,11 @@ export async function transfer(
 ): Promise<TransferReport> {
   const concurrency = opts.concurrency ?? Math.max(4, os.cpus().length * 4);
   const retryOpts: RetryOptions = { maxRetries: opts.maxRetries ?? 5, ...opts.retry };
-  if (opts.ensureBuckets !== false) {
-    for (const b of planDestBuckets(plan)) await store.ensureBucket(b);
-  }
+  for (const b of planDestBuckets(plan)) await store.ensureBucket(b);
 
   const limit = pLimit(concurrency);
-  const copiedKeys: string[] = [];
-  const skippedKeys: string[] = [];
+  let copied = 0;
+  let skipped = 0;
   const errors: TransferError[] = [];
   const total = plan.items.length;
   let done = 0;
@@ -67,7 +68,7 @@ export async function transfer(
       limit(async () => {
         try {
           if (await destMatchesSource(store, item)) {
-            skippedKeys.push(item.destKey);
+            skipped += 1;
           } else {
             await withRetry(
               () =>
@@ -80,7 +81,7 @@ export async function transfer(
                 }),
               retryOpts,
             );
-            copiedKeys.push(item.destKey);
+            copied += 1;
           }
         } catch (err) {
           errors.push({ item, error: (err as Error).message });
@@ -92,12 +93,5 @@ export async function transfer(
     ),
   );
 
-  return {
-    total,
-    copied: copiedKeys.length,
-    skipped: skippedKeys.length,
-    copiedKeys,
-    skippedKeys,
-    errors,
-  };
+  return { total, copied, skipped, errors };
 }

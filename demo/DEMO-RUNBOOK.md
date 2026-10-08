@@ -60,7 +60,7 @@ pnpm install
 ## TL;DR — the whole demo in one command
 
 ```bash
-demo/all.sh                 # up → seed → map → migrate(split) → verify → upgrade(.dvc v2→v3) → delete-GATE (dry-run)
+demo/all.sh                 # up → seed → map → migrate(split) → verify → repoint(.dvc remote:) → delete-GATE (dry-run) → dvc pull
 DEMO_DELETE=1 demo/all.sh   # …and actually drain OLD in the delete step
 demo/chaos.sh               # break it 4 ways; prove each gate refuses + recovers
 ```
@@ -138,7 +138,8 @@ provider -> bucket routing (from the latest map report):
 > Talking point: *"The split key comes from git history of the `.dvc` files, not a
 > guess. `dvc-map` is a gate — any orphan md5 (referenced but missing) or provider
 > conflict (one md5 in two providers) fails it with exit 1. Here it's clean. The two
-> `unreferenced` objects are the `.dir` directory objects, which route to `public`."*
+> `unreferenced` objects are `.dir` directory objects no `.dvc` points at — migrate
+> leaves them in OLD unless `--allow-unreferenced` routes them to `public`."*
 
 ---
 
@@ -163,10 +164,9 @@ dvc-coinout                13          3151309
 dvc-earnin                 13          1195120
 dvc-intuit                 13         12400085
 dvc-kronos                 13          6077637
-dvc-public                  2            25127
 ```
 
-Log line: `... split=true copied=68 skipped=0 errors=0 verifyOk=true ...`
+Log line: `... copied=66 skipped=0 errors=0 verifyOk=true unreferencedSkipped=2 ...`
 
 > Talking points:
 > - *"One bucket in, six buckets out — routed by the mapping. The objects moved
@@ -174,9 +174,9 @@ Log line: `... split=true copied=68 skipped=0 errors=0 verifyOk=true ...`
 >   machine. In production that means no big EC2 and zero in-region transfer cost."*
 > - *"Every object is copied **verbatim** — the key and hash are preserved, so the
 >   object layout is unchanged (no normalization). It's a pure data move; migrate
->   does NOT touch `.dvc` files. The v2 → v3 `.dvc` upgrade is a **separate**
->   command, `dvc-upgrade` (step 7), run on the code repo before the delete. md5 is
->   preserved either way, so OLD stays deletable."*
+>   does NOT touch `.dvc` files. Pointing the repo at the new buckets is a
+>   **separate** command, `dvc-repoint` (step 7), run on the code repo before the
+>   delete."*
 > - *"Deep ETag verification (always on) proved each object byte-for-byte. OLD is
 >   untouched — migrate never deletes."*
 > - *Scale:* the command is already memory-sharded (one md5-prefix shard at a time),
@@ -194,7 +194,7 @@ Runs `dvc-verify --old old-demo --git-repo …` against the **union** of the pro
 buckets:
 
 ```
-... buckets=6 ok=true matched=68 missing=0 ...
+... buckets=11 ok=true matched=66 missing=0 unreferencedSkipped=2 ...
 verify exit code: 0  (0 = every object proven in NEW)
 ```
 
@@ -206,29 +206,28 @@ verify exit code: 0  (0 = every object proven in NEW)
 
 ---
 
-## 7. Repoint — upgrade the git repo's `.dvc` files to v3 (BEFORE delete)
+## 7. Repoint — point the git repo's `.dvc` files at their provider remotes (BEFORE delete)
 
 ```bash
-demo/06-upgrade.sh                              # upgrade the whole fixture
-SUBDIR=data/dvc/Earnin demo/06-upgrade.sh       # scope to one provider's .dvc files
+demo/06-repoint.sh                     # repoint the whole fixture
+PROVIDER=earnin demo/06-repoint.sh     # scope to one provider's .dvc files
 ```
 
-This is the **repo plane** — separate from the object-store data plane. It upgrades
-outdated `.dvc` files in the git repo from **v2 → v3** in place by adding
-`hash: md5` (pure-YAML, md5 preserved, no `dvc` binary or checked-out data needed).
-The fixture is a deliberate mix of v2 and v3, so you see both counts:
+This is the **repo plane** — separate from the object-store data plane. It adds
+`remote: <provider>` to each `.dvc` out (pure-YAML, no `dvc` binary or checked-out
+data needed). The hash format is deliberately **left alone**: DVC 3 reads a v2 out
+(no `hash:`) from the legacy `xx/yyy…` key layout that migrate copied verbatim, and
+a v3 out from `files/md5/…`. Adding `hash: md5` to a v2 out would make it unpullable.
 
 ```
-before: 44 v2 (.dvc without hash) + 22 v3 already current
-... upgraded: 44, alreadyV3: 22, errors: 0
-sample upgrade (git diff ...): +  hash: md5
- 44 files changed, 44 insertions(+)
+... repointed: 66, already: 0, errors: 0
+sample repoint (git diff ...): +  remote: affinity
 ```
 
-> Talking point: *"The pointer upgrade is a one-line diff per file — `+ hash: md5`
-> — and the md5 is untouched, so it's a no-risk metadata bump. It runs BEFORE the
-> delete: upgrade the repo to v3, confirm a build works, THEN drain the old data.
-> A true v1 `.dvc` (`wdir`/`deps`/multi-out) fails loud instead of being mangled."*
+> Talking point: *"The pointer change is a one-line diff per file — `+ remote:
+> affinity` — and nothing about the hash changes, so every historical object stays
+> addressable. A `.dvc` the tool can't parse (`wdir`/`deps`/multi-out) or a folder
+> absent from the provider map fails loud instead of being guessed."*
 
 ## 8. The delete gate (dry-run by default)
 
@@ -254,19 +253,11 @@ override (see [`RUNBOOK.md`](RUNBOOK.md) §2).
 demo/08-dvc-pull.sh   # needs the `dvc` binary (v3+) on PATH
 ```
 
-Spins up a throwaway DVC repo per test, points its remote at a provider bucket
-(LocalStack `endpointurl`), shows `dvc cache dir` (empty before, content-addressed
-after), then pulls one object of each storage layout and md5-verifies the result.
-
-> **KNOWN RED (by design):** the v3-layout pull passes; the **v2-layout pull
-> FAILS**. A `.dvc` upgraded to v3 by `dvc-upgrade` makes DVC look only under
-> `files/md5/…`, but the verbatim migrate leaves v2-layout objects at their
-> `xx/yyy…` keys — DVC reports "missing cache files". The same object pulls fine
-> with its original v2 `.dvc`. This is the empirical answer to the open question in
-> [`plans/2026-06-17-dvc-v3-migration.md`](plans/2026-06-17-dvc-v3-migration.md):
-> a repointed repo DOES need v3-layout objects in the remote. Until the engine
-> decision lands (layout backfill in migrate vs. gating upgrade), this step exits 1
-> and `demo/all.sh` ends red at step 08.
+Spins up a throwaway DVC repo per test with **no default remote** — only the named
+remote from the repointed `.dvc`'s `remote:` field (LocalStack `endpointurl`) — shows
+`dvc cache dir` (empty before, content-addressed after), then pulls one v2 `.dvc`
+(object at `xx/yyy…`) and one v3 `.dvc` (object at `files/md5/…`) and md5-verifies
+each. Run with `DEMO_DELETE=1 demo/all.sh` to prove both pull after OLD is drained.
 
 ## 10. Chaos test — break it, watch it refuse, watch it recover
 
@@ -312,13 +303,13 @@ demo/down.sh     # stop LocalStack and remove its volume
 | `demo/03-map.sh` | build git fixture + run real `dvc-map` (provider routing + validation) |
 | `demo/04-migrate.sh` | `dvc-migrate` (monolith → per-provider) with before/after |
 | `demo/05-verify.sh` | `dvc-verify` (the gate, union of buckets + destination assertion) |
-| `demo/06-upgrade.sh` | `dvc-upgrade` — upgrade the git repo's v2 `.dvc` files to v3 (`SUBDIR=` to scope) |
+| `demo/06-repoint.sh` | `dvc-repoint` — set each `.dvc`'s `remote:` to its provider (`PROVIDER=` to scope) |
 | `demo/07-delete.sh` | `dvc-delete` gate — dry-run by default; `DEMO_DELETE=1` drains OLD |
-| `demo/08-dvc-pull.sh` | real `dvc pull` consumer proof per storage layout (v2 currently RED — see §9) |
-| `demo/incremental.sh` | ONE provider per run: migrate → verify → upgrade → delete its slice |
+| `demo/08-dvc-pull.sh` | real `dvc pull` consumer proof per storage layout, through the repointed remote |
+| `demo/incremental.sh` | ONE provider per run: migrate → verify → repoint → delete its slice |
 | `demo/chaos.sh` | break the migration 4 ways; prove each gate refuses + recovers |
 | `demo/reset.sh` / `demo/down.sh` | clean slate / stop LocalStack |
-| `demo/all.sh` | up → seed → map → migrate → verify → upgrade → delete-gate → dvc-pull (dry-run; `DEMO_DELETE=1` to drain) |
+| `demo/all.sh` | up → seed → map → migrate → verify → repoint → delete-gate → dvc-pull (dry-run; `DEMO_DELETE=1` to drain) |
 
 ---
 

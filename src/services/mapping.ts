@@ -1,9 +1,7 @@
 import type { Region } from "../config/sources.js";
-import { dirMemberMd5s } from "../domain/dirObject.js";
 import { tryKeyToMd5 } from "../domain/dvcKey.js";
 import { folderToSuffix, generateBucketName, isKnownFolder } from "../domain/providerMap.js";
 import type { GitDvcEntry } from "../ports/gitHistory.js";
-import type { ObjectStore } from "../ports/objectStore.js";
 
 export interface MappedObject {
   md5: string;
@@ -156,37 +154,4 @@ export function assertMappingValid(result: MappingResult): void {
   ) {
     throw new MappingValidationError(result);
   }
-}
-
-export interface ResolveDirMembersResult {
-  members: Record<string, string[]>;
-
-  dirReadErrors: DirReadError[];
-}
-
-export async function resolveDirMembers(
-  store: ObjectStore,
-  bucket: string,
-  storeKeys: readonly string[],
-  dirMd5s: readonly string[],
-): Promise<ResolveDirMembersResult> {
-  const keyByMd5 = new Map<string, string>();
-  for (const key of storeKeys) {
-    const md5 = tryKeyToMd5(key);
-    if (md5 !== null) keyByMd5.set(md5, key);
-  }
-
-  const members: Record<string, string[]> = {};
-  const dirReadErrors: DirReadError[] = [];
-  for (const dirMd5 of dirMd5s) {
-    const key = keyByMd5.get(dirMd5);
-    if (key === undefined) continue;
-    try {
-      const bytes = await store.getBytes(bucket, key);
-      members[dirMd5] = dirMemberMd5s(bytes);
-    } catch (err) {
-      dirReadErrors.push({ dirMd5, error: (err as Error).message });
-    }
-  }
-  return { members, dirReadErrors };
 }

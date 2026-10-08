@@ -118,6 +118,7 @@ step "CHAOS 4/4 — an object in the WRONG provider bucket must be caught (not j
 pick_provider_sample
 PUB="$(provider_bucket public)"
 note "moving s3://$SAMPLE_BUCKET/$SAMPLE_KEY into the PUBLIC bucket (a private→public misroute)…"
+awsls s3 mb "s3://$PUB" >/dev/null 2>&1 || true # holds only unreferenced data, which migrate skips by default
 awsls s3 cp "s3://$SAMPLE_BUCKET/$SAMPLE_KEY" "s3://$PUB/$SAMPLE_KEY" --only-show-errors
 awsls s3 rm "s3://$SAMPLE_BUCKET/$SAMPLE_KEY" --only-show-errors
 expect_refuse "verify with a misrouted object (present in public, not its provider bucket)" \

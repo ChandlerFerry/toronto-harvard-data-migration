@@ -13,8 +13,8 @@ step "DELETE — drain OLD after re-verifying the union (dry-run by default)"
 
 snapshot "BEFORE delete"
 
-note "dry-run delete (compares OLD vs each provider bucket — new files vs old files, NO git)…"
-if out="$(cli delete --old "$OLD_BUCKET" --region "$AWS_REGION" 2>&1)"; then
+note "dry-run delete (compares OLD vs each provider bucket, refusing misrouted objects per git)…"
+if out="$(cli delete --old "$OLD_BUCKET" --git-repo "$FIXTURE_DIR" --region "$AWS_REGION" 2>&1)"; then
   ok "dry-run gate PASS — would delete the verified set"
 else
   err "$out"; print_report delete; exit 1
@@ -24,7 +24,7 @@ print_report delete
 if [ "${DEMO_DELETE:-0}" = "1" ]; then
   step "DELETE (for real) — --no-dry-run"
   note "deleting verified objects from s3://$OLD_BUCKET …"
-  if out="$(cli delete --old "$OLD_BUCKET" --region "$AWS_REGION" --no-dry-run 2>&1)"; then
+  if out="$(cli delete --old "$OLD_BUCKET" --git-repo "$FIXTURE_DIR" --region "$AWS_REGION" --no-dry-run 2>&1)"; then
     ok "OLD drained — every deleted object was first proven byte-identical in its provider bucket"
   else
     err "$out"; print_report delete; exit 1

@@ -1,7 +1,7 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
-export type ReportKind = "migrate" | "verify" | "delete" | "map" | "upgrade";
+export type ReportKind = "migrate" | "verify" | "delete" | "map" | "repoint";
 
 export interface ReportRow {
   key: string;

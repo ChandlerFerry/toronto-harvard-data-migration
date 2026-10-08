@@ -54,7 +54,7 @@ err()  { printf '%s%s%s\n' "$C_RED" "$*" "$C_RESET" >&2; }
 # `aws` against LocalStack.
 awsls() { aws --endpoint-url "$AWS_ENDPOINT_URL" --region "$AWS_REGION" "$@"; }
 
-# Runner for the migration CLI subcommands (map/migrate/verify/delete/upgrade).
+# Runner for the migration CLI subcommands (map/migrate/verify/delete/repoint).
 cli() { pnpm -s exec tsx "$REPO_ROOT/src/cli/main.ts" "$@"; }
 
 # Object count + total bytes for a bucket ("0 0" if absent/empty). Robust to the

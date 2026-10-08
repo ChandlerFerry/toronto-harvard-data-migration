@@ -22,12 +22,12 @@ describe("diffByMd5", () => {
     expect(r.extra).toEqual([]);
   });
 
-  it("tolerates v2-old vs v3-new layout for the same md5", () => {
+  it("does not accept a v3-layout copy as proof of a v2-layout key (clients read the exact key)", () => {
     const old = [obj(A, 10, "v2")];
     const neu = [obj(A, 10, "v3")];
     const r = diffByMd5(old, neu);
-    expect(r.missing).toEqual([]);
-    expect(r.matched).toEqual([obj(A, 10, "v2").key]);
+    expect(r.matched).toEqual([]);
+    expect(r.missing[0]).toMatchObject({ md5: A, reason: "absent" });
   });
 
   it("reports an absent old object as missing", () => {
@@ -74,10 +74,10 @@ describe("diffByMd5", () => {
   });
 
   it("carries .dir directory objects like leaf objects", () => {
-    const old = [obj(DIR, 5)];
+    const old = [obj(DIR, 5, "v3")];
     const neu = [obj(DIR, 5, "v3")];
     const r = diffByMd5(old, neu);
-    expect(r.matched).toEqual([obj(DIR, 5).key]);
+    expect(r.matched).toEqual([obj(DIR, 5, "v3").key]);
     expect(r.missing).toEqual([]);
   });
 });

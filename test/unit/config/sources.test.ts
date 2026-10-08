@@ -3,7 +3,7 @@ import {
   ACCOUNTS,
   BUCKET_PREFIX,
   SOURCES,
-  bucketForSource,
+  bucketName,
   isSource,
 } from "../../../src/config/sources.js";
 
@@ -37,14 +37,12 @@ describe("config/sources canonical naming", () => {
     ["coinout", "us-east-2", "dvc-coinout-305901448049-us-east-2-an"],
     ["lightcast", "us-east-2", "dvc-lightcast-305901448049-us-east-2-an"],
     ["public", "us-east-1", "dvc-public-305901448049-us-east-1-an"],
-  ] as const)("bucketForSource(%s, %s) -> %s", (source, region, expected) => {
-    expect(bucketForSource(source, region)).toBe(expected);
+  ] as const)("bucketName(%s, %s) -> %s", (source, region, expected) => {
+    expect(bucketName(source, region)).toBe(expected);
   });
 
   it("account-regional names end with the mandatory -<accountId>-<region>-an marker", () => {
-    expect(bucketForSource("affinity", "us-east-2")).toMatch(
-      /^dvc-affinity-305901448049-us-east-2-an$/,
-    );
+    expect(bucketName("affinity", "us-east-2")).toMatch(/^dvc-affinity-305901448049-us-east-2-an$/);
   });
 
   it("isSource narrows valid and rejects invalid names", () => {

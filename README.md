@@ -63,53 +63,47 @@ export OLD_BUCKET=oi-economictracker-dvc
 export GIT_REPO=./tracker-dvc-sandbox
 dvcm map --old "$OLD_BUCKET" --git-repo "$GIT_REPO"
 ```
+`map` exits 1 on orphans (in git but never pushed to OLD: nothing to copy, review them),
+conflicts or unreadable `.dir` objects (these two also abort `migrate`). Check its `unreferenced` count:
+those OLD objects are referenced by no `.dvc` under `data/dvc` in any commit (e.g. `dvc.lock`-only
+outputs, `.dvc` files outside `data/dvc`, unparseable `.dvc` YAML). `migrate`/`verify` leave them in
+OLD. Review the `unreferenced` rows in the map report, and pass `--allow-unreferenced` to the
+`public` migrate/verify only if they belong in public.
 
-1. Migrate & Verify
-2. Verify even more things
+1. Migrate & Verify (one provider at a time)
 ```
 dvcm migrate --old "$OLD_BUCKET" --git-repo "$GIT_REPO" --provider affinity
 dvcm verify  --old "$OLD_BUCKET" --git-repo "$GIT_REPO" --provider affinity
-dvcm upgrade --git-repo "$GIT_REPO" --provider affinity
 
 dvcm migrate --old "$OLD_BUCKET" --git-repo "$GIT_REPO" --provider coinout
 dvcm verify  --old "$OLD_BUCKET" --git-repo "$GIT_REPO" --provider coinout
-dvcm upgrade --git-repo "$GIT_REPO" --provider coinout
 
 dvcm migrate --old "$OLD_BUCKET" --git-repo "$GIT_REPO" --provider earnin
 dvcm verify  --old "$OLD_BUCKET" --git-repo "$GIT_REPO" --provider earnin
-dvcm upgrade --git-repo "$GIT_REPO" --provider earnin
 
 dvcm migrate --old "$OLD_BUCKET" --git-repo "$GIT_REPO" --provider homebase
 dvcm verify  --old "$OLD_BUCKET" --git-repo "$GIT_REPO" --provider homebase
-dvcm upgrade --git-repo "$GIT_REPO" --provider homebase
 
 dvcm migrate --old "$OLD_BUCKET" --git-repo "$GIT_REPO" --provider intuit
 dvcm verify  --old "$OLD_BUCKET" --git-repo "$GIT_REPO" --provider intuit
-dvcm upgrade --git-repo "$GIT_REPO" --provider intuit
 
 dvcm migrate --old "$OLD_BUCKET" --git-repo "$GIT_REPO" --provider kronos
 dvcm verify  --old "$OLD_BUCKET" --git-repo "$GIT_REPO" --provider kronos
-dvcm upgrade --git-repo "$GIT_REPO" --provider kronos
 
 dvcm migrate --old "$OLD_BUCKET" --git-repo "$GIT_REPO" --provider lightcast
 dvcm verify  --old "$OLD_BUCKET" --git-repo "$GIT_REPO" --provider lightcast
-dvcm upgrade --git-repo "$GIT_REPO" --provider lightcast
 
 dvcm migrate --old "$OLD_BUCKET" --git-repo "$GIT_REPO" --provider paychex
 dvcm verify  --old "$OLD_BUCKET" --git-repo "$GIT_REPO" --provider paychex
-dvcm upgrade --git-repo "$GIT_REPO" --provider paychex
 
 dvcm migrate --old "$OLD_BUCKET" --git-repo "$GIT_REPO" --provider womply
 dvcm verify  --old "$OLD_BUCKET" --git-repo "$GIT_REPO" --provider womply
-dvcm upgrade --git-repo "$GIT_REPO" --provider womply
 
 dvcm migrate --old "$OLD_BUCKET" --git-repo "$GIT_REPO" --provider zearn
 dvcm verify  --old "$OLD_BUCKET" --git-repo "$GIT_REPO" --provider zearn
-dvcm upgrade --git-repo "$GIT_REPO" --provider zearn
 
 dvcm migrate --old "$OLD_BUCKET" --git-repo "$GIT_REPO" --provider public
 dvcm verify  --old "$OLD_BUCKET" --git-repo "$GIT_REPO" --provider public
-dvcm upgrade --git-repo "$GIT_REPO" --provider public
 ```
 
 1. Verify all
@@ -117,10 +111,49 @@ dvcm upgrade --git-repo "$GIT_REPO" --provider public
 dvcm verify --old "$OLD_BUCKET" --git-repo "$GIT_REPO"
 ```
 
-1. Delete / Real Delete
+1. Repoint the repo (before delete)
+
+Do NOT add `hash: md5` to v2 `.dvc` files (no `dvc cache migrate --dvc-files`): migrate copies
+keys verbatim, and DVC 3 only finds v2 objects at the legacy `xx/yyy…` key when the out has no `hash:`.
 ```
-dvcm delete --old "$OLD_BUCKET" --provider affinity
+cd "$GIT_REPO"
+for p in affinity coinout earnin homebase intuit kronos lightcast paychex womply zearn public; do
+  dvc remote add -f "$p" "s3://dvc-$p-305901448049-$AWS_REGION-an"
+done
+dvc remote default --unset
+cd -
+
+dvcm repoint --git-repo "$GIT_REPO" --dry-run
+dvcm repoint --git-repo "$GIT_REPO"
+git -C "$GIT_REPO" add .dvc/config data/dvc
+git -C "$GIT_REPO" commit -m "chore: point dvc outputs at per-provider remotes"
+```
+Smoke-test with `dvc pull` in a fresh clone. Older commits have no `remote:` field: pull them with
+`dvc pull -r <provider>`. New `.dvc` files need it too: re-run `dvcm repoint` (idempotent).
+
+1. Delete / Real Delete (`--no-dry-run` requires `--git-repo`)
+```
+dvcm delete --old "$OLD_BUCKET" --git-repo "$GIT_REPO" --provider affinity
 ```
 ```
-dvcm delete --old "$OLD_BUCKET" --no-dry-run --allow-production
+dvcm delete --old "$OLD_BUCKET" --git-repo "$GIT_REPO" --no-dry-run --allow-production
+```
+Objects whose ETags can't be compared (multipart uploads, > 5 GB copies) are refused and reported
+as `corrupt:size-only`. Spot-check a few, then re-run with `--allow-size-only` to delete them.
+
+The role above has no delete access. The delete step needs a role that also allows
+`s3:DeleteObject` on OLD:
+```
+{
+  "Effect": "Allow",
+  "Action": [
+    "s3:ListBucket",
+    "s3:GetObject",
+    "s3:DeleteObject"
+  ],
+  "Resource": [
+    "arn:aws:s3:::<REAL_OLD_BUCKET>",
+    "arn:aws:s3:::<REAL_OLD_BUCKET>/*"
+  ]
+}
 ```

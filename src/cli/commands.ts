@@ -1,25 +1,25 @@
-import { join, relative, sep } from "node:path";
 import { Command } from "commander";
 import { GitHistoryCli } from "../adapters/gitHistoryCli.js";
 import type { Logger } from "../adapters/logger.js";
 import { type Region, SOURCES, bucketName, isSource } from "../config/sources.js";
-import { tryKeyToMd5 } from "../domain/dvcKey.js";
-import { folderToSuffix } from "../domain/providerMap.js";
 import type { GitDvcEntry, GitHistory } from "../ports/gitHistory.js";
 import type { ObjectStore } from "../ports/objectStore.js";
 import {
   type MappingValidationError,
   assertMappingValid,
   buildMapping,
-  resolveDirMembers,
 } from "../services/mapping.js";
-import { type ReportEnvelope, writeRunReport } from "../services/runReport.js";
+import { type RepointDeps, repointAll } from "../services/repoint.js";
+import {
+  type ReportEnvelope,
+  type ReportKind,
+  type ReportRow,
+  writeRunReport,
+} from "../services/runReport.js";
 import { deleteOldAgainstBuckets, migrateSharded, verifySharded } from "../services/sharded.js";
 import { type SplitMapping, buildSplitMapping, expandDirMembers } from "../services/split.js";
-import { type UpgradeAllDeps, upgradeAll } from "../services/upgrade.js";
 
 const parseInt10 = (v: string): number => Number.parseInt(v, 10);
-const md5Of = (key: string): string => tryKeyToMd5(key) ?? "";
 
 function isPositiveInt(n: number | undefined): n is number {
   return n !== undefined && Number.isInteger(n) && n > 0;
@@ -32,7 +32,7 @@ export interface CliDeps {
   now: () => string;
   gitHistory?: GitHistory;
 
-  upgrade?: UpgradeAllDeps;
+  repoint?: RepointDeps;
 }
 
 function parseRegion(value: string): Region {
@@ -48,8 +48,32 @@ interface CommonOptions {
   shardLength?: number;
   reportDir: string;
   allowUnknownDirs: boolean;
+  allowUnreferenced: boolean;
   provider?: string;
 }
+
+async function abortRun(
+  deps: CliDeps,
+  reportDir: string,
+  kind: ReportKind,
+  ts: string,
+  summary: Record<string, unknown>,
+  reason: string,
+  rows?: ReportRow[],
+): Promise<null> {
+  deps.logger.error({ reason }, `${kind} aborted: ${reason}`);
+  await writeRunReport(reportDir, `${kind}-${ts}`, {
+    kind,
+    createdAt: ts,
+    summary: { ...summary, aborted: true, reason },
+    ...(rows !== undefined ? { rows } : {}),
+  });
+  process.exitCode = 1;
+  return null;
+}
+
+const unknownProvider = (stub: string): string =>
+  `unknown provider "${stub}" (expected one of: ${SOURCES.join(", ")})`;
 
 function withCommonOptions(cmd: Command, deps: CliDeps): Command {
   return cmd
@@ -71,6 +95,11 @@ function withCommonOptions(cmd: Command, deps: CliDeps): Command {
       false,
     )
     .option(
+      "--allow-unreferenced",
+      "route OLD objects that no .dvc in git history references to public (by default they stay in OLD)",
+      false,
+    )
+    .option(
       "--provider <stub>",
       "scope the run to ONE provider's bucket (incremental, single-provider migrate/verify/delete); the other providers' objects are left untouched",
     )
@@ -87,68 +116,68 @@ async function providerScopeOrAbort(
   split: SplitMapping,
   region: Region,
   o: CommonOptions,
-  kind: ReportEnvelope["kind"],
+  kind: ReportKind,
   ts: string,
 ): Promise<ProviderScope | null> {
   const stub = o.provider ?? "";
   if (!isSource(stub)) {
-    const reason = `unknown provider "${stub}" (expected one of: ${SOURCES.join(", ")})`;
-    deps.logger.error({ provider: stub }, `${kind} aborted: ${reason}`);
-    await writeRunReport(o.reportDir, `${kind}-${ts}`, {
-      kind,
-      createdAt: ts,
-      summary: { old: o.old, aborted: true, reason },
-    });
-    process.exitCode = 1;
-    return null;
+    return abortRun(deps, o.reportDir, kind, ts, { old: o.old }, unknownProvider(stub));
   }
   const targetBucket = bucketName(stub, region);
   return { keepMd5: (md5) => split.predictBucket(md5) === targetBucket, targetBucket };
 }
+
+// Objects no .dvc references would fall back to public; keep them in OLD unless the
+// operator opts in. Unreferenced md5s predict public, so scoped non-public runs never count them.
+function routedFilter(
+  split: ResolvedSplit,
+  scope: ProviderScope | null,
+  allowUnreferenced: boolean,
+): { keepMd5: (md5: string) => boolean; unreferenced: Set<string> } {
+  const unreferenced = new Set<string>();
+  const keepMd5 = (md5: string): boolean => {
+    if (scope !== null && !scope.keepMd5(md5)) return false;
+    if (allowUnreferenced || split.providerByMd5.has(md5)) return true;
+    unreferenced.add(md5);
+    return false;
+  };
+  return { keepMd5, unreferenced };
+}
+
+function warnUnreferenced(deps: CliDeps, kind: ReportKind, unreferenced: Set<string>): void {
+  if (unreferenced.size === 0) return;
+  deps.logger.warn(
+    { unreferenced: unreferenced.size },
+    `${kind}: skipped ${unreferenced.size} unreferenced md5(s); they stay in OLD (no .dvc in git history references them; see map's unreferenced rows) — pass --allow-unreferenced to route them to public`,
+  );
+}
+
+type ResolvedSplit = SplitMapping & { missingDirs: string[] };
 
 async function resolveSplitOrAbort(
   deps: CliDeps,
   store: ObjectStore,
   region: Region,
   o: CommonOptions,
-  kind: ReportEnvelope["kind"],
+  kind: ReportKind,
   ts: string,
-): Promise<SplitMapping | null> {
+): Promise<ResolvedSplit | null> {
   const git = deps.gitHistory ?? new GitHistoryCli();
 
   let entries: GitDvcEntry[];
   try {
     entries = await git.walk(o.gitRepo, o.subdir);
   } catch (err) {
-    const reason = (err as Error).message;
-    deps.logger.error({ err: reason }, `${kind} aborted`);
-    await writeRunReport(o.reportDir, `${kind}-${ts}`, {
-      kind,
-      createdAt: ts,
-      summary: { old: o.old, gitRepo: o.gitRepo, aborted: true, reason },
-    });
-    process.exitCode = 1;
-    return null;
+    const summary = { old: o.old, gitRepo: o.gitRepo };
+    return abortRun(deps, o.reportDir, kind, ts, summary, (err as Error).message);
   }
 
   const dirMd5s = entries.map((e) => e.md5).filter((m) => m.endsWith(".dir"));
-  const { members, dirReadErrors } = await expandDirMembers(store, o.old, dirMd5s);
+  const { members, missingDirs, dirReadErrors } = await expandDirMembers(store, o.old, dirMd5s);
   const split = buildSplitMapping({ gitEntries: entries, dirMembers: members, region });
 
-  const abort = async (
-    reason: string,
-    rows: { key: string; md5: string; action: string; status: string }[],
-  ): Promise<null> => {
-    deps.logger.error({ reason }, `${kind} aborted: ${reason}`);
-    await writeRunReport(o.reportDir, `${kind}-${ts}`, {
-      kind,
-      createdAt: ts,
-      summary: { old: o.old, aborted: true, reason },
-      rows,
-    });
-    process.exitCode = 1;
-    return null;
-  };
+  const abort = (reason: string, rows: ReportRow[]): Promise<null> =>
+    abortRun(deps, o.reportDir, kind, ts, { old: o.old }, reason, rows);
 
   if (split.conflicts.length > 0) {
     return abort(
@@ -192,7 +221,13 @@ async function resolveSplitOrAbort(
       `${kind}: routing ${split.unknownDirs.length} unknown folder(s) to public (--allow-unknown-dirs)`,
     );
   }
-  return split;
+  if (missingDirs.length > 0) {
+    deps.logger.warn(
+      { missingDirs },
+      `${kind}: ${missingDirs.length} .dir object(s) referenced in git are absent from OLD (never pushed); their members cannot be routed and count as unreferenced`,
+    );
+  }
+  return { ...split, missingDirs };
 }
 
 interface MigrateOptions extends CommonOptions {
@@ -220,6 +255,7 @@ export function makeMigrateCommand(deps: CliDeps): Command {
       scope = await providerScopeOrAbort(deps, split, region, o, "migrate", ts);
       if (scope === null) return;
     }
+    const { keepMd5, unreferenced } = routedFilter(split, scope, o.allowUnreferenced);
 
     const rep = await migrateSharded({
       store,
@@ -228,7 +264,7 @@ export function makeMigrateCommand(deps: CliDeps): Command {
       newBucket: scope?.targetBucket ?? split.destBuckets[0] ?? o.old,
       resolve: split.resolve,
       deep: true,
-      ...(scope !== null ? { keepMd5: scope.keepMd5 } : {}),
+      keepMd5,
       ...(isPositiveInt(o.concurrency) ? { concurrency: o.concurrency } : {}),
       ...(o.shardLength !== undefined ? { shardLength: o.shardLength } : {}),
     });
@@ -247,6 +283,8 @@ export function makeMigrateCommand(deps: CliDeps): Command {
         errors: rep.transfer.errors.length,
         verifyOk: rep.verify.ok,
         missing: rep.verify.missing.length,
+        unreferencedSkipped: unreferenced.size,
+        missingDirs: split.missingDirs.length,
       },
 
       rows: rep.transfer.errors.map((e) => ({
@@ -259,6 +297,7 @@ export function makeMigrateCommand(deps: CliDeps): Command {
     };
     const written = await writeRunReport(o.reportDir, `migrate-${ts}`, env);
     deps.logger.info({ ...env.summary, report: written.jsonPath }, "migrate complete");
+    warnUnreferenced(deps, "migrate", unreferenced);
     if (!rep.verify.ok || rep.transfer.errors.length > 0) process.exitCode = 1;
   });
 }
@@ -282,6 +321,7 @@ export function makeVerifyCommand(deps: CliDeps): Command {
       scope = await providerScopeOrAbort(deps, split, region, o, "verify", ts);
       if (scope === null) return;
     }
+    const { keepMd5, unreferenced } = routedFilter(split, scope, o.allowUnreferenced);
 
     const newBuckets = scope !== null ? [scope.targetBucket] : split.destBuckets;
     const vr = await verifySharded(store, o.old, store, newBuckets[0] ?? o.old, {
@@ -289,7 +329,7 @@ export function makeVerifyCommand(deps: CliDeps): Command {
       ...(o.shardLength !== undefined ? { shardLength: o.shardLength } : {}),
       newBuckets,
       expectBucketByMd5: split.predictBucket,
-      ...(scope !== null ? { keepMd5: scope.keepMd5 } : {}),
+      keepMd5,
     });
     const env: ReportEnvelope = {
       kind: "verify",
@@ -306,6 +346,8 @@ export function makeVerifyCommand(deps: CliDeps): Command {
         missingTruncated: vr.missingTruncated,
         shardsWithGaps: vr.shardsWithGaps.length,
         deepEtagSkipped: vr.deepEtagSkipped,
+        unreferencedSkipped: unreferenced.size,
+        missingDirs: split.missingDirs.length,
       },
       rows: vr.missing.map((m) => ({
         key: m.key,
@@ -316,6 +358,7 @@ export function makeVerifyCommand(deps: CliDeps): Command {
     };
     const written = await writeRunReport(o.reportDir, `verify-${ts}`, env);
     deps.logger.info({ ...env.summary, report: written.jsonPath }, "verify complete");
+    warnUnreferenced(deps, "verify", unreferenced);
     if (!vr.ok) process.exitCode = 1;
   });
 }
@@ -331,6 +374,7 @@ interface DeleteOptions {
   reportDir: string;
   dryRun: boolean;
   allowProduction: boolean;
+  allowSizeOnly: boolean;
 }
 
 function withDeleteOptions(cmd: Command, deps: CliDeps): Command {
@@ -343,7 +387,7 @@ function withDeleteOptions(cmd: Command, deps: CliDeps): Command {
     )
     .option(
       "--git-repo <dir>",
-      "code repo whose git history is the md5 -> provider routing; when given, an object proven only in the WRONG bucket is refused as misrouted (RECOMMENDED for production)",
+      "code repo whose git history is the md5 -> provider routing; an object proven only in the WRONG bucket is refused as misrouted (REQUIRED with --no-dry-run)",
     )
     .option("--subdir <path>", "subtree containing .dvc files", "data/dvc")
     .option(
@@ -359,13 +403,18 @@ function withDeleteOptions(cmd: Command, deps: CliDeps): Command {
     .option("--dry-run", "preview only (default)", true)
     .option("--no-dry-run", "ACTUALLY delete (disables the dry-run default)")
     .option("--allow-production", "permit a production-named OLD bucket target", false)
+    .option(
+      "--allow-size-only",
+      "also delete objects proven by size+key only (multipart ETags cannot be byte-compared); refused by default",
+      false,
+    )
     .option("--report-dir <dir>", "directory for run reports", deps.reportDir);
 }
 
 export function makeDeleteCommand(deps: CliDeps): Command {
   return withDeleteOptions(
     new Command("dvc-delete").description(
-      "Delete from OLD every object proven byte-identical across the per-provider bucket union — compares object stores (new files vs old files). Git-free by default; pass --git-repo to also refuse misrouted objects. Dry-run by DEFAULT; pass --no-dry-run to actually delete. Memory-sharded.",
+      "Delete from OLD every object proven byte-identical across the per-provider bucket union — compares object stores (new files vs old files). Dry-run by DEFAULT; --no-dry-run actually deletes and requires --git-repo so misrouted objects are refused. Memory-sharded.",
     ),
     deps,
   ).action(async (o: DeleteOptions) => {
@@ -373,20 +422,20 @@ export function makeDeleteCommand(deps: CliDeps): Command {
     const store = deps.makeStore(region);
     const ts = deps.now();
 
+    if (o.provider !== undefined && !isSource(o.provider)) {
+      await abortRun(deps, o.reportDir, "delete", ts, { old: o.old }, unknownProvider(o.provider));
+      return;
+    }
+    if (!o.dryRun && o.gitRepo === undefined) {
+      const reason =
+        "--no-dry-run requires --git-repo: the misroute gate must run before anything is deleted";
+      await abortRun(deps, o.reportDir, "delete", ts, { old: o.old, dryRun: false }, reason);
+      return;
+    }
+
     let providerBuckets: string[];
     let provider: string | undefined;
     if (o.provider !== undefined) {
-      if (!isSource(o.provider)) {
-        const reason = `unknown provider "${o.provider}" (expected one of: ${SOURCES.join(", ")})`;
-        deps.logger.error({ provider: o.provider }, `delete aborted: ${reason}`);
-        await writeRunReport(o.reportDir, `delete-${ts}`, {
-          kind: "delete",
-          createdAt: ts,
-          summary: { old: o.old, aborted: true, reason },
-        });
-        process.exitCode = 1;
-        return;
-      }
       provider = o.provider;
       providerBuckets = [bucketName(o.provider, region)];
     } else {
@@ -401,7 +450,7 @@ export function makeDeleteCommand(deps: CliDeps): Command {
         deps,
         store,
         region,
-        { ...o, gitRepo: o.gitRepo },
+        { ...o, gitRepo: o.gitRepo, allowUnreferenced: false },
         "delete",
         ts,
       );
@@ -409,7 +458,7 @@ export function makeDeleteCommand(deps: CliDeps): Command {
     } else {
       deps.logger.warn(
         { old: o.old },
-        "delete: no --git-repo — misroute assertion DISABLED; objects are proven by presence in any targeted bucket",
+        "delete (dry-run): no --git-repo — misroute assertion DISABLED; objects are proven by presence in any targeted bucket",
       );
     }
 
@@ -420,6 +469,7 @@ export function makeDeleteCommand(deps: CliDeps): Command {
         ...(split !== null ? { expectBucketByMd5: split.predictBucket } : {}),
         dryRun: o.dryRun,
         allowProduction: o.allowProduction,
+        allowSizeOnly: o.allowSizeOnly,
       });
       const env: ReportEnvelope = {
         kind: "delete",
@@ -453,26 +503,21 @@ export function makeDeleteCommand(deps: CliDeps): Command {
       if (del.deepEtagSkipped > 0) {
         deps.logger.warn(
           { deepEtagSkipped: del.deepEtagSkipped, report: written.jsonPath },
-          "delete: some objects verified by size+key only (multipart ETag) — not byte-proven",
+          o.allowSizeOnly
+            ? "delete: some objects verified by size+key only (multipart ETag) — not byte-proven"
+            : "delete: refused objects provable by size+key only (multipart ETag) — pass --allow-size-only to delete them",
         );
       }
       if (del.corrupt.length > 0) {
         deps.logger.warn(
           { ...env.summary, report: written.jsonPath },
-          "delete refused corrupt/misrouted object(s): left in OLD",
+          "delete refused corrupt/misrouted/size-only object(s): left in OLD",
         );
         process.exitCode = 1;
       }
     } catch (err) {
-      const reason = (err as Error).message;
-      deps.logger.error({ err: reason }, "delete aborted");
-
-      await writeRunReport(o.reportDir, `delete-${ts}`, {
-        kind: "delete",
-        createdAt: ts,
-        summary: { old: o.old, dryRun: o.dryRun, aborted: true, reason },
-      });
-      process.exitCode = 1;
+      const summary = { old: o.old, dryRun: o.dryRun };
+      await abortRun(deps, o.reportDir, "delete", ts, summary, (err as Error).message);
     }
   });
 }
@@ -510,10 +555,9 @@ export function makeMapCommand(deps: CliDeps): Command {
         const entries = await git.walk(o.gitRepo, o.subdir);
         const storeKeys = (await store.list(o.old)).map((x) => x.key);
         const dirMd5s = entries.map((e) => e.md5).filter((m) => m.endsWith(".dir"));
-        const { members: dirMembers, dirReadErrors } = await resolveDirMembers(
+        const { members: dirMembers, dirReadErrors } = await expandDirMembers(
           store,
           o.old,
-          storeKeys,
           dirMd5s,
         );
         result = buildMapping({
@@ -524,16 +568,8 @@ export function makeMapCommand(deps: CliDeps): Command {
           dirReadErrors,
         });
       } catch (err) {
-        const reason = (err as Error).message;
-        deps.logger.error({ err: reason }, "map aborted");
-
-        const abortEnv: ReportEnvelope = {
-          kind: "map",
-          createdAt: ts,
-          summary: { old: o.old, gitRepo: o.gitRepo, aborted: true, reason },
-        };
-        await writeRunReport(o.reportDir, `map-${ts}`, abortEnv);
-        process.exitCode = 1;
+        const summary = { old: o.old, gitRepo: o.gitRepo };
+        await abortRun(deps, o.reportDir, "map", ts, summary, (err as Error).message);
         return;
       }
 
@@ -601,95 +637,81 @@ export function makeMapCommand(deps: CliDeps): Command {
     });
 }
 
-interface UpgradeOptions {
+interface RepointCliOptions {
   gitRepo: string;
   subdir: string;
   provider?: string;
+  allowUnknownDirs: boolean;
   reportDir: string;
   dryRun: boolean;
 }
 
-export function makeUpgradeCommand(deps: CliDeps): Command {
-  return new Command("dvc-upgrade")
+export function makeRepointCommand(deps: CliDeps): Command {
+  return new Command("dvc-repoint")
     .description(
-      "Upgrade outdated .dvc files in the git repo (v2 -> v3: adds `hash: md5`, md5 preserved). v1/extended .dvc fail loud. Writes the files unless --dry-run.",
+      "Point each .dvc out at its provider's DVC remote (sets `remote: <provider>`; the hash format is left alone so v2 outs keep reading the legacy key layout). Writes the files unless --dry-run. The named remotes must exist in .dvc/config.",
     )
-    .requiredOption("--git-repo <dir>", "code repo whose .dvc files are upgraded in place")
+    .requiredOption("--git-repo <dir>", "code repo whose .dvc files are repointed in place")
     .option("--subdir <path>", "subtree containing .dvc files", "data/dvc")
     .option(
       "--provider <stub>",
-      "upgrade ONLY the .dvc files under this provider's folder(s) (incremental, one provider at a time); omit to upgrade the whole subtree",
+      "repoint ONLY the .dvc files under this provider's folder(s); omit to repoint the whole subtree",
     )
-    .option("--dry-run", "preview the upgrade WITHOUT writing any .dvc", false)
+    .option(
+      "--allow-unknown-dirs",
+      "point folders absent from the provider map at public instead of failing (matches migrate --allow-unknown-dirs)",
+      false,
+    )
+    .option("--dry-run", "preview the repoint WITHOUT writing any .dvc", false)
     .option("--report-dir <dir>", "directory for run reports", deps.reportDir)
-    .action(async (o: UpgradeOptions) => {
+    .action(async (o: RepointCliOptions) => {
       const ts = deps.now();
-      if (deps.upgrade === undefined) {
-        deps.logger.error({}, "dvc-upgrade aborted: no upgrade deps wired");
-        process.exitCode = 1;
+      const base = { gitRepo: o.gitRepo };
+      if (deps.repoint === undefined) {
+        await abortRun(deps, o.reportDir, "repoint", ts, base, "no repoint deps wired");
+        return;
+      }
+      if (o.provider !== undefined && !isSource(o.provider)) {
+        await abortRun(deps, o.reportDir, "repoint", ts, base, unknownProvider(o.provider));
         return;
       }
 
-      let keepPath: ((path: string) => boolean) | undefined;
-      if (o.provider !== undefined) {
-        if (!isSource(o.provider)) {
-          const reason = `unknown provider "${o.provider}" (expected one of: ${SOURCES.join(", ")})`;
-          deps.logger.error({ provider: o.provider }, `upgrade aborted: ${reason}`);
-          await writeRunReport(o.reportDir, `upgrade-${ts}`, {
-            kind: "upgrade",
-            createdAt: ts,
-            summary: { gitRepo: o.gitRepo, aborted: true, reason },
-          });
-          process.exitCode = 1;
-          return;
-        }
-        const stub = o.provider;
-        const root = join(o.gitRepo, o.subdir);
-        keepPath = (path) => folderToSuffix(relative(root, path).split(sep)[0] ?? "") === stub;
-      }
-
-      let result: Awaited<ReturnType<typeof upgradeAll>>;
+      let entries: Awaited<ReturnType<typeof repointAll>>;
       try {
-        result = await upgradeAll(deps.upgrade, o.gitRepo, o.subdir, {
+        entries = await repointAll(deps.repoint, o.gitRepo, o.subdir, {
           dryRun: o.dryRun,
-          continueOnError: true,
-          ...(keepPath !== undefined ? { keepPath } : {}),
+          allowUnknownDirs: o.allowUnknownDirs,
+          ...(o.provider !== undefined ? { provider: o.provider } : {}),
         });
       } catch (err) {
-        const reason = (err as Error).message;
-        deps.logger.error({ err: reason }, "dvc-upgrade aborted");
-        await writeRunReport(o.reportDir, `upgrade-${ts}`, {
-          kind: "upgrade",
-          createdAt: ts,
-          summary: { gitRepo: o.gitRepo, aborted: true, reason },
-        });
-        process.exitCode = 1;
+        await abortRun(deps, o.reportDir, "repoint", ts, base, (err as Error).message);
         return;
       }
 
+      const count = (status: string): number => entries.filter((e) => e.status === status).length;
+      const errors = count("error");
       const env: ReportEnvelope = {
-        kind: "upgrade",
+        kind: "repoint",
         createdAt: ts,
         summary: {
-          gitRepo: o.gitRepo,
+          ...base,
           ...(o.provider !== undefined ? { provider: o.provider } : {}),
           dryRun: o.dryRun,
-          upgraded: result.upgraded,
-          alreadyV3: result.alreadyV3,
-          errors: result.errors,
+          repointed: count("repointed"),
+          already: count("already"),
+          errors,
         },
-
-        rows: result.entries
-          .filter((e) => e.status !== "already-v3")
+        rows: entries
+          .filter((e) => e.status !== "already")
           .map((e) => ({
             key: e.path,
-            md5: e.md5 ?? "",
-            action: "upgrade",
-            status: e.status === "error" ? `error:${e.error}` : "upgraded-v3",
+            md5: "",
+            action: "repoint",
+            status: e.status === "error" ? `error:${e.error}` : `repointed:${e.remote}`,
           })),
       };
-      const written = await writeRunReport(o.reportDir, `upgrade-${ts}`, env);
-      deps.logger.info({ ...env.summary, report: written.jsonPath }, "upgrade complete");
-      if (result.errors > 0) process.exitCode = 1;
+      const written = await writeRunReport(o.reportDir, `repoint-${ts}`, env);
+      deps.logger.info({ ...env.summary, report: written.jsonPath }, "repoint complete");
+      if (errors > 0) process.exitCode = 1;
     });
 }

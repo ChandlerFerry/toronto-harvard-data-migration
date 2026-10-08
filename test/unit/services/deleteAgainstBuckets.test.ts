@@ -231,7 +231,7 @@ describe("deleteOldAgainstBuckets — git-free, object-store-driven delete", () 
     expect((await store.list(PROD)).length).toBe(1); // nothing deleted
   });
 
-  it("surfaces deepEtagSkipped: a multipart-composite provider ETag deletes on size+key, flagged not byte-proven", async () => {
+  it("REFUSES a size+key-only match (multipart ETag, not byte-proven) by default", async () => {
     const store = new CompositeEtagStore(AFFINITY);
     await store.ensureBucket(OLD);
     await store.put(OLD, md5ToKey(A, "v2"), "alpha"); // OLD keeps a single-part ETag
@@ -239,8 +239,27 @@ describe("deleteOldAgainstBuckets — git-free, object-store-driven delete", () 
     await store.put(AFFINITY, md5ToKey(A, "v2"), "alpha"); // same bytes, listed with a composite ETag
 
     const del = await deleteOldAgainstBuckets(store, OLD, [AFFINITY], { dryRun: false, ...noEnv });
-    expect(del.deleted).toBe(1); // size+key tolerant (the documented multipart fallback)
-    expect(del.deepEtagSkipped).toBe(1); // but flagged: NOT byte-proven
+    expect(del.deleted).toBe(0);
+    expect(del.deepEtagSkipped).toBe(1);
+    expect(del.corrupt.map((m) => m.reason)).toEqual(["size-only"]);
+    expect((await store.list(OLD)).length).toBe(1);
+  });
+
+  it("allowSizeOnly: deletes a size+key-only match, still counted as not byte-proven", async () => {
+    const store = new CompositeEtagStore(AFFINITY);
+    await store.ensureBucket(OLD);
+    await store.put(OLD, md5ToKey(A, "v2"), "alpha");
+    await store.ensureBucket(AFFINITY);
+    await store.put(AFFINITY, md5ToKey(A, "v2"), "alpha");
+
+    const del = await deleteOldAgainstBuckets(store, OLD, [AFFINITY], {
+      dryRun: false,
+      allowSizeOnly: true,
+      ...noEnv,
+    });
+    expect(del.deleted).toBe(1);
+    expect(del.deepEtagSkipped).toBe(1);
+    expect(del.corrupt).toEqual([]);
     expect((await store.list(OLD)).length).toBe(0);
   });
 });

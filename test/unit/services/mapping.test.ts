@@ -6,8 +6,8 @@ import {
   MappingValidationError,
   assertMappingValid,
   buildMapping,
-  resolveDirMembers,
 } from "../../../src/services/mapping.js";
+import { expandDirMembers } from "../../../src/services/split.js";
 import { FakeObjectStore } from "../../support/fakeObjectStore.js";
 
 const A = "a0000000000000000000000000000001";
@@ -91,7 +91,7 @@ describe("buildMapping", () => {
   });
 });
 
-describe("resolveDirMembers", () => {
+describe("expandDirMembers (shared by map and migrate)", () => {
   it("reads .dir objects from the store and returns member md5s", async () => {
     const store = new FakeObjectStore();
     await store.ensureBucket("old");
@@ -101,12 +101,7 @@ describe("resolveDirMembers", () => {
       dirKey,
       `[{"md5":"${M1}","relpath":"a.csv"},{"md5":"${M2}","relpath":"b/c.csv"}]`,
     );
-    const members = await resolveDirMembers(
-      store,
-      "old",
-      [dirKey, "README.md"],
-      [D, "missing.dir"],
-    );
+    const members = await expandDirMembers(store, "old", [D]);
     expect(members.members).toEqual({ [D]: [M1, M2] });
     expect(members.dirReadErrors).toEqual([]);
   });
@@ -125,7 +120,7 @@ describe("resolveDirMembers", () => {
 
     await store.put("old", badKey, "[]");
 
-    const result = await resolveDirMembers(store, "old", [goodKey, badKey], [D, badMd5]);
+    const result = await expandDirMembers(store, "old", [D, badMd5]);
 
     expect(result.members).toEqual({ [D]: [M1, M2] });
     expect(result.dirReadErrors.map((e) => e.dirMd5)).toEqual([badMd5]);

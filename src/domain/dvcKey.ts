@@ -68,14 +68,6 @@ export function keyToMd5(key: string): string {
   return parseKey(key).hash;
 }
 
-export function detectLayout(key: string): DvcLayout {
-  return parseKey(key).layout;
-}
-
-export function isDirKey(key: string): boolean {
-  return parseKey(key).isDir;
-}
-
 export function isDvcObjectKey(key: string): boolean {
   try {
     parseKey(key);

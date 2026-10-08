@@ -1,6 +1,6 @@
 {
   "name": "harvard-data-migration",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "description": "Clean-room TypeScript engine to migrate DVC content-addressed data between S3 remotes with hardened validate-before-delete.",
   "private": true,
   "type": "module",

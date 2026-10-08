@@ -1,13 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
   InvalidDotDvcError,
-  Md5ChangedError,
   UnsupportedDvcFeatureError,
-  assertMd5Preserved,
   parseDotDvc,
   serializeDotDvc,
   setRemote,
-  upgradeToV3,
 } from "../../../src/domain/dotDvcFile.js";
 
 const V2 = `outs:
@@ -121,34 +118,5 @@ describe("setRemote", () => {
     expect(reparsed.remote).toBe("ohio-coinout");
 
     expect(reparsed.md5).toBe(f.md5);
-  });
-});
-
-describe("upgradeToV3", () => {
-  it("adds `hash: md5` to a v2 out, preserving the md5/size/path", () => {
-    const before = parseDotDvc(V2);
-    const after = upgradeToV3(before);
-    expect(after.version).toBe(3);
-    expect(after.md5).toBe(before.md5);
-    const reparsed = parseDotDvc(serializeDotDvc(after));
-    expect(reparsed.version).toBe(3);
-    expect(reparsed.md5).toBe(before.md5);
-    expect(reparsed.size).toBe(before.size);
-    expect(reparsed.path).toBe(before.path);
-    expect(serializeDotDvc(after)).toMatch(/hash: md5/);
-  });
-
-  it("returns a v3 file unchanged", () => {
-    const v3 = parseDotDvc(V3);
-    expect(upgradeToV3(v3)).toBe(v3);
-  });
-});
-
-describe("assertMd5Preserved", () => {
-  it("passes when unchanged", () => {
-    expect(() => assertMd5Preserved("abc", "abc")).not.toThrow();
-  });
-  it("throws Md5ChangedError when changed", () => {
-    expect(() => assertMd5Preserved("abc", "def")).toThrow(Md5ChangedError);
   });
 });

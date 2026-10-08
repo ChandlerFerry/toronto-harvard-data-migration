@@ -4,7 +4,7 @@ import { createLogger } from "../adapters/logger.js";
 import { createS3Client } from "../adapters/s3Client.js";
 import { S3ObjectStore } from "../adapters/s3ObjectStore.js";
 import type { ObjectStore } from "../ports/objectStore.js";
-import type { UpgradeAllDeps } from "../services/upgrade.js";
+import type { RepointDeps } from "../services/repoint.js";
 import type { CliDeps } from "./commands.js";
 
 export function parseMaxAttempts(raw: string | undefined): number | undefined {
@@ -47,7 +47,7 @@ async function listDvcFiles(repoDir: string, subdir: string): Promise<string[]> 
     .map((e) => join(e.parentPath, e.name));
 }
 
-function upgradeFromEnv(): UpgradeAllDeps {
+function repointFromEnv(): RepointDeps {
   return {
     listDvcFiles,
     readFile: (p) => readFile(p, "utf8"),
@@ -61,6 +61,6 @@ export function defaultDeps(): CliDeps {
     logger: createLogger(),
     reportDir: process.env.REPORT_DIR ?? "reports",
     now: stamp,
-    upgrade: upgradeFromEnv(),
+    repoint: repointFromEnv(),
   };
 }

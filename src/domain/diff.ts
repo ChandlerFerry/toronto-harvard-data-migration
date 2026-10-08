@@ -5,7 +5,12 @@ export interface ObjectMeta {
   size: number;
 }
 
-export type MissingReason = "absent" | "size-mismatch" | "etag-mismatch" | "misrouted";
+export type MissingReason =
+  | "absent"
+  | "size-mismatch"
+  | "etag-mismatch"
+  | "misrouted"
+  | "size-only";
 
 export interface MissingEntry {
   key: string;
@@ -42,7 +47,9 @@ export function diffByMd5(oldObjs: ObjectMeta[], newObjs: ObjectMeta[]): DiffRep
     const md5 = keyToMd5(o.key);
     oldMd5s.add(md5);
     const copies = newByMd5.get(md5);
-    if (copies === undefined) {
+    // Migrate copies keys verbatim and DVC clients read the exact key, so another
+    // layout's copy of the same md5 is not proof.
+    if (copies === undefined || !copies.some((c) => c.key === o.key)) {
       missing.push({ key: o.key, md5, reason: "absent", oldSize: o.size });
       continue;
     }

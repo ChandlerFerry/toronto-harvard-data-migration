@@ -3,8 +3,8 @@
 [ -n "${BASH_VERSION:-}" ] || exec bash "$0" "$@"
 # Incremental migration — ONE provider per run. Each invocation migrates a single
 # provider's slice from the OLD monolith into its dvc-<provider> bucket, deep-verifies
-# it, deletes ONLY that provider's objects from OLD, then upgrades ONLY that provider's
-# .dvc files in the git repo to v3 (the repo plane). The other providers' objects stay
+# it, repoints ONLY that provider's .dvc files in the git repo at its remote (the repo
+# plane), then deletes ONLY that provider's objects from OLD. The other providers' objects stay
 # in OLD until their turn — so you can watch OLD drain provider-by-provider and prove
 # the delete removes only what was migrated.
 #   demo/incremental.sh                       # process the next un-migrated provider
@@ -71,9 +71,22 @@ done
 
 done_count=$(grep -cve '^$' "$DONE_FILE" || true)
 
+# Unreferenced objects (no .dvc points at them) are never migrated by default, so they
+# are all that should be left in OLD once every provider is done.
+old_left() { local n _; read -r n _ < <(bucket_stats "$OLD_BUCKET"); echo "$n"; }
+report_leftovers() {
+  local n; n="$(old_left)"
+  if [ "$n" -eq 0 ]; then
+    ok "OLD is fully drained."
+  else
+    note "$n unreferenced object(s) remain in OLD (no .dvc references them) — review map's unreferenced rows; migrate --allow-unreferenced routes them to public."
+  fi
+}
+
 if [ -z "$NEXT" ]; then
-  ok "all $total providers migrated — OLD is fully drained. Nothing left to do."
-  snapshot "FINAL (OLD drained; every provider in its own bucket)"
+  ok "all $total providers migrated. Nothing left to do."
+  report_leftovers
+  snapshot "FINAL (every provider in its own bucket)"
   note "start over with: INCREMENTAL_RESET=1 demo/incremental.sh"
   exit 0
 fi
@@ -102,20 +115,20 @@ else
 fi
 print_report verify
 
-# Repo plane (BEFORE delete): upgrade ONLY this provider's .dvc files to v3 (md5
-# preserved) so the repo points at v3 before the OLD data is drained.
-note "upgrade ONLY provider '$NEXT' .dvc files (v2 -> v3 in the git repo)…"
-if out="$(cli upgrade --git-repo "$FIXTURE_DIR" --provider "$NEXT" 2>&1)"; then
-  ok "upgraded provider '$NEXT' .dvc files to v3"
+# Repo plane (BEFORE delete): point ONLY this provider's .dvc files at its remote so
+# the repo reads the new bucket before the OLD data is drained.
+note "repoint ONLY provider '$NEXT' .dvc files (remote: $NEXT in the git repo)…"
+if out="$(cli repoint --git-repo "$FIXTURE_DIR" --provider "$NEXT" 2>&1)"; then
+  ok "repointed provider '$NEXT' .dvc files"
 else
   err "$out"
-  print_report upgrade
+  print_report repoint
   exit 1
 fi
-print_report upgrade
+print_report repoint
 
-note "delete ONLY provider '$NEXT' objects from s3://$OLD_BUCKET (compares OLD vs the dvc-$NEXT bucket; NO git)…"
-if out="$(cli delete --old "$OLD_BUCKET" --region "$AWS_REGION" --provider "$NEXT" --no-dry-run 2>&1)"; then
+note "delete ONLY provider '$NEXT' objects from s3://$OLD_BUCKET (compares OLD vs the dvc-$NEXT bucket; misroute gate via git)…"
+if out="$(cli delete --old "$OLD_BUCKET" --git-repo "$FIXTURE_DIR" --region "$AWS_REGION" --provider "$NEXT" --no-dry-run 2>&1)"; then
   ok "drained provider '$NEXT' from OLD — only its migrated objects were removed"
 else
   err "$out"
@@ -133,5 +146,6 @@ step "DONE — provider '$NEXT' migrated, verified, and removed from OLD"
 if [ "$remaining" -gt 0 ]; then
   note "$remaining provider(s) left. Run demo/incremental.sh again for the next one."
 else
-  ok "that was the last provider — OLD is now fully drained."
+  ok "that was the last provider."
+  report_leftovers
 fi

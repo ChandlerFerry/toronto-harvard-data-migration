@@ -17,13 +17,6 @@ export class UnsupportedDvcFeatureError extends Error {
   }
 }
 
-export class Md5ChangedError extends Error {
-  constructor(before: string, after: string) {
-    super(`md5 changed during rewrite: ${before} -> ${after}`);
-    this.name = "Md5ChangedError";
-  }
-}
-
 const OutSchema = z
   .object({
     md5: z.string(),
@@ -102,19 +95,8 @@ export function serializeDotDvc(file: DotDvcFile): string {
   return yamlStringify(file.raw, { indentSeq: false });
 }
 
-export function upgradeToV3(file: DotDvcFile): DotDvcFile {
-  if (file.version === 3) return file;
-  const raw = structuredClone(file.raw) as { outs: Array<Record<string, unknown>> };
-  raw.outs[0]!.hash = "md5";
-  return { ...file, raw: raw as unknown as Record<string, unknown>, version: 3 };
-}
-
 export function setRemote(file: DotDvcFile, remote: string): DotDvcFile {
   const raw = structuredClone(file.raw) as { outs: Array<Record<string, unknown>> };
   raw.outs[0]!.remote = remote;
   return { ...file, raw: raw as unknown as Record<string, unknown>, remote };
-}
-
-export function assertMd5Preserved(before: string, after: string): void {
-  if (before !== after) throw new Md5ChangedError(before, after);
 }
