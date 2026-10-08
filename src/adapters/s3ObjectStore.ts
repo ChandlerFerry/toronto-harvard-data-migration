@@ -6,6 +6,7 @@ import {
   CreateMultipartUploadCommand,
   DeleteObjectsCommand,
   GetObjectCommand,
+  HeadBucketCommand,
   HeadObjectCommand,
   ListObjectsV2Command,
   PutObjectCommand,
@@ -50,7 +51,16 @@ export class S3ObjectStore implements ObjectStore {
     private readonly opts: S3ObjectStoreOptions = {},
   ) {}
 
+  // Check first: the provider buckets are owned by another account (IaC-managed), where
+  // CreateBucket fails with BucketAlreadyExists; HeadBucket only needs s3:ListBucket.
   async ensureBucket(bucket: string): Promise<void> {
+    try {
+      await this.client.send(new HeadBucketCommand({ Bucket: bucket }));
+      return;
+    } catch (err) {
+      const status = (err as { $metadata?: { httpStatusCode?: number } }).$metadata?.httpStatusCode;
+      if (status !== 404) throw err;
+    }
     const region = this.opts.region;
     const input =
       region !== undefined && region !== "us-east-1"
