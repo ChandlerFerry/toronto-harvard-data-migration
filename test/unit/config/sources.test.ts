@@ -8,9 +8,9 @@ import {
 } from "../../../src/config/sources.js";
 
 describe("config/sources canonical naming", () => {
-  it("defines exactly the 11 TF-canonical sources", () => {
-    expect(SOURCES).toHaveLength(11);
-    expect(new Set(SOURCES).size).toBe(11);
+  it("defines exactly the 14 TF-canonical sources", () => {
+    expect(SOURCES).toHaveLength(14);
+    expect(new Set(SOURCES).size).toBe(14);
   });
 
   it("uses corrected source names (coinout, not cointout)", () => {

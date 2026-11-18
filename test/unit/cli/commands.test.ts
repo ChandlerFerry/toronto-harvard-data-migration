@@ -855,6 +855,61 @@ describe("dvc-repoint (per-out remote: field, repo plane)", () => {
     expect(process.exitCode).toBe(0);
   });
 
+  describe("an md5 in CONFLICT_WINNERS", () => {
+    const P_PINNED = "/repo/data/dvc/Earnin/Files for paper/cps_00037.dta.dvc";
+    const P_EARNIN = "/repo/data/dvc/Earnin/e.zip.dvc";
+    const pinned = "outs:\n- md5: 703d59bedb4cd14056ade7d804697b93\n  path: cps_00037.dta\n";
+
+    it("gets the winner's remote, not its own folder's", async () => {
+      const files = new Map([
+        [P_PINNED, pinned],
+        [P_EARNIN, v2],
+      ]);
+      const dir = await tmpDir();
+
+      await run(files, dir);
+
+      expect(files.get(P_PINNED)).toMatch(/remote: public/);
+      expect(files.get(P_EARNIN)).toMatch(/remote: earnin/);
+      expect(process.exitCode).toBe(0);
+    });
+
+    it("is scoped by --provider through the winner", async () => {
+      const files = new Map([
+        [P_PINNED, pinned],
+        [P_EARNIN, v2],
+      ]);
+      const dir = await tmpDir();
+
+      await run(files, dir, "--provider", "earnin");
+
+      expect(files.get(P_PINNED)).toBe(pinned);
+      expect(files.get(P_EARNIN)).toMatch(/remote: earnin/);
+      await rm(dir, { recursive: true, force: true });
+      const dir2 = await tmpDir();
+
+      await run(files, dir2, "--provider", "public");
+
+      expect(files.get(P_PINNED)).toMatch(/remote: public/);
+      expect((await readReport(dir2)).summary.repointed).toBe(1);
+    });
+  });
+
+  it("--provider ignores an unsupported .dvc under another provider's folder", async () => {
+    const files = new Map([
+      ["/repo/data/dvc/Kronos/c.csv.dvc", v1],
+      [P_PUB, v2],
+    ]);
+    const dir = await tmpDir();
+
+    await run(files, dir, "--provider", "public");
+
+    const { summary } = await readReport(dir);
+    expect(summary.errors).toBe(0);
+    expect(summary.repointed).toBe(1);
+    expect(process.exitCode).toBe(0);
+  });
+
   it("fails loud (exit 1) and records an unsupported .dvc as an error", async () => {
     const files = new Map([["/repo/data/dvc/Kronos/c.csv.dvc", v1]]);
     const dir = await tmpDir();

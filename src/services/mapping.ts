@@ -61,15 +61,46 @@ export interface BuildMappingInput {
 
 const UNREFERENCED_PROVIDER = "public";
 
+export const IGNORED_MD5S: ReadonlySet<string> = new Set([
+  "d41d8cd98f00b204e9800998ecf8427e",
+  "d751713988987e9331980363e24189ce.dir",
+]);
+
+export const CONFLICT_WINNERS: ReadonlyMap<string, string> = new Map([
+  // asec.dta, also under CPS
+  ["71fbbbf071c852d8e27b37a5e4badf46", "ASEC"],
+  // laucnty19.xlsx, also under BLS
+  ["b2a19d3a0e7a537576524acaf53bd053", "Local Area Unemployment Statistics"],
+  // unadjusted_multiple_job_holders_LNU02026619.csv, also under CPS
+  ["4ffa1dad1c1eae6d10fb29963dd27932", "St Louis Fed"],
+  // county_covars_atlas.dta, also under Opportunity Atlas
+  ["a1a7d15fa800c69dd733cb147dde9b74", "County covariates Atlas"],
+  // cps_00037.dta, also under Earnin
+  ["703d59bedb4cd14056ade7d804697b93", "CPS"],
+  // womply_subcategory_to_naics.dta, also under Crosswalks
+  ["f23e9f911d736fdb84bf478fd5e80ab9", "Womply"],
+  // womply subcategory x monthly 2020.dta, also under Industry Shares of Consumer Spending and Business Revenues
+  ["17348cf575b18ba0de9a7acbd675a67e", "Womply"],
+  // naics_2digit_bg_cw.dta, also under Industry Shares of Employment
+  ["3b527609483aa593b63ef66ef7f0c1a6", "NAICS Crosswalk"],
+]);
+
 export function resolveProviderByMd5(
   gitEntries: readonly GitDvcEntry[],
   dirMembers: Readonly<Record<string, readonly string[]>> = {},
+  winners: ReadonlyMap<string, string> = CONFLICT_WINNERS,
 ): { providerByMd5: Map<string, string>; conflicts: ProviderConflict[]; unknownDirs: string[] } {
   const providerByMd5 = new Map<string, string>();
   const conflictProviders = new Map<string, Set<string>>();
   const unknownDirSet = new Set<string>();
 
   const assign = (md5: string, provider: string): void => {
+    if (IGNORED_MD5S.has(md5)) return;
+    const winner = winners.get(md5);
+    if (winner !== undefined) {
+      providerByMd5.set(md5, winner);
+      return;
+    }
     const current = providerByMd5.get(md5);
     if (current === undefined) {
       providerByMd5.set(md5, provider);

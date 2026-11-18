@@ -2,10 +2,14 @@ import { describe, expect, it } from "vitest";
 import { bucketName } from "../../../src/config/sources.js";
 import { md5ToKey } from "../../../src/domain/dvcKey.js";
 import type { GitDvcEntry } from "../../../src/ports/gitHistory.js";
+import { isKnownFolder } from "../../../src/domain/providerMap.js";
 import {
+  CONFLICT_WINNERS,
+  IGNORED_MD5S,
   MappingValidationError,
   assertMappingValid,
   buildMapping,
+  resolveProviderByMd5,
 } from "../../../src/services/mapping.js";
 import { expandDirMembers } from "../../../src/services/split.js";
 import { FakeObjectStore } from "../../support/fakeObjectStore.js";
@@ -17,6 +21,8 @@ const M1 = "10000000000000000000000000000004";
 const M2 = "20000000000000000000000000000005";
 const X = "90000000000000000000000000000006";
 const Z = "c0000000000000000000000000000007";
+const EMPTY_FILE = "d41d8cd98f00b204e9800998ecf8427e";
+const EMPTY_DIR = "d751713988987e9331980363e24189ce.dir";
 
 const entry = (md5: string, rootDir: string): GitDvcEntry => ({
   md5,
@@ -89,6 +95,79 @@ describe("buildMapping", () => {
     expect(result.conflicts).toEqual([{ md5: A, providers: ["Affinity", "Zearn"] }]);
     expect(() => assertMappingValid(result)).toThrow(MappingValidationError);
   });
+
+  it("never routes the empty-file and empty-.dir md5s, even when two providers name them", () => {
+    const result = buildMapping({
+      gitEntries: [
+        entry(A, "Affinity"),
+        entry(D, "CoinOut"),
+        entry(EMPTY_FILE, "Earnin"),
+        entry(EMPTY_FILE, "QCEW"),
+        entry(EMPTY_DIR, "Earnin"),
+        entry(EMPTY_DIR, "Homebase"),
+      ],
+      dirMembers: { [D]: [M1, EMPTY_FILE] },
+      storeKeys: [A, D, M1, EMPTY_FILE, EMPTY_DIR].map((md5) => md5ToKey(md5, "v2")),
+      region: "us-east-2",
+    });
+    expect(result.conflicts).toEqual([]);
+    expect(result.orphanMd5s).toEqual([]);
+    expect(result.unreferencedKeys).toEqual([
+      md5ToKey(EMPTY_FILE, "v2"),
+      md5ToKey(EMPTY_DIR, "v2"),
+    ]);
+    expect(() => assertMappingValid(result)).not.toThrow();
+  });
+});
+
+describe("conflict winners", () => {
+  it("routes a listed md5 to its winner whatever order the folders are walked in", () => {
+    const winners = new Map([[A, "Zearn"]]);
+    for (const order of [
+      ["Affinity", "Zearn"],
+      ["Zearn", "Affinity"],
+    ]) {
+      const entries = order.map((folder) => entry(A, folder));
+      const result = resolveProviderByMd5(entries, {}, winners);
+      expect(result.conflicts).toEqual([]);
+      expect(result.providerByMd5.get(A)).toBe("Zearn");
+    }
+  });
+
+  it("routes the members of a listed .dir to the winner", () => {
+    const winners = new Map([[D, "CoinOut"]]);
+    const entries = [entry(D, "Affinity"), entry(D, "CoinOut")];
+    const result = resolveProviderByMd5(entries, { [D]: [M1, M2] }, winners);
+    expect(result.conflicts).toEqual([]);
+    expect(result.providerByMd5.get(M1)).toBe("CoinOut");
+    expect(result.providerByMd5.get(M2)).toBe("CoinOut");
+  });
+
+  it("still reports a conflict on an md5 that is not listed", () => {
+    const winners = new Map([[A, "Zearn"]]);
+    const entries = [entry(B, "Affinity"), entry(B, "Zearn")];
+    const result = resolveProviderByMd5(entries, {}, winners);
+    expect(result.conflicts).toEqual([{ md5: B, providers: ["Affinity", "Zearn"] }]);
+  });
+
+  it("clears a real listed conflict through buildMapping", () => {
+    const asec = "71fbbbf071c852d8e27b37a5e4badf46";
+    const result = buildMapping({
+      gitEntries: [entry(asec, "CPS"), entry(asec, "ASEC")],
+      storeKeys: [md5ToKey(asec, "v2")],
+      region: "us-east-2",
+    });
+    expect(result.conflicts).toEqual([]);
+    expect(result.mapped.map((m) => m.destBucket)).toEqual([OHIO("public")]);
+    expect(() => assertMappingValid(result)).not.toThrow();
+  });
+
+  it("names only known folders and never an ignored md5", () => {
+    for (const [md5, folder] of CONFLICT_WINNERS) {
+      expect(isKnownFolder(folder), `${md5} -> ${folder}`).toBe(true);
+      expect(IGNORED_MD5S.has(md5)).toBe(false);
+    }
+  });
 });
 
 describe("expandDirMembers (shared by map and migrate)", () => {
@@ -124,6 +203,16 @@ describe("expandDirMembers (shared by map and migrate)", () => {
 
     expect(result.members).toEqual({ [D]: [M1, M2] });
     expect(result.dirReadErrors.map((e) => e.dirMd5)).toEqual([badMd5]);
+  });
+
+  it("skips the empty .dir listing instead of recording a read error", async () => {
+    const store = new FakeObjectStore();
+    await store.ensureBucket("old");
+    await store.put("old", md5ToKey(EMPTY_DIR, "v2"), "[]");
+
+    const result = await expandDirMembers(store, "old", [EMPTY_DIR]);
+
+    expect(result).toEqual({ members: {}, missingDirs: [], dirReadErrors: [] });
   });
 });
 

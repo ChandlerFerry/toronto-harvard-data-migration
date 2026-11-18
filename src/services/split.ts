@@ -5,7 +5,12 @@ import type { DestResolver } from "../domain/plan.js";
 import { UNMATCHED_SUFFIX, generateBucketName } from "../domain/providerMap.js";
 import type { GitDvcEntry } from "../ports/gitHistory.js";
 import type { ObjectStore } from "../ports/objectStore.js";
-import { type DirReadError, type ProviderConflict, resolveProviderByMd5 } from "./mapping.js";
+import {
+  type DirReadError,
+  IGNORED_MD5S,
+  type ProviderConflict,
+  resolveProviderByMd5,
+} from "./mapping.js";
 
 export interface SplitMapping {
   resolve: DestResolver;
@@ -84,6 +89,7 @@ export async function expandDirMembers(
   const dirReadErrors: DirReadError[] = [];
 
   for (const dirMd5 of new Set(dirMd5s)) {
+    if (IGNORED_MD5S.has(dirMd5)) continue;
     let bytes: Uint8Array | undefined;
     let error: string | undefined;
     for (const layout of ["v3", "v2"] as const) {

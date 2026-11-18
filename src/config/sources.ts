@@ -1,13 +1,16 @@
 export const SOURCES = [
   "affinity",
+  "biz2credit",
   "coinout",
   "earnin",
   "homebase",
   "intuit",
   "kronos",
   "lightcast",
+  "mastercard",
   "paychex",
   "public",
+  "safegraph",
   "womply",
   "zearn",
 ] as const;

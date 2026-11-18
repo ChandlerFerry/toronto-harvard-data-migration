@@ -118,7 +118,7 @@ Do NOT add `hash: md5` to v2 `.dvc` files (no `dvc cache migrate --dvc-files`): 
 keys verbatim, and DVC 3 only finds v2 objects at the legacy `xx/yyy…` key when the out has no `hash:`.
 ```
 cd "$GIT_REPO"
-for p in affinity coinout earnin homebase intuit kronos lightcast paychex womply zearn public; do
+for p in affinity biz2credit coinout earnin homebase intuit kronos lightcast mastercard paychex safegraph womply zearn public; do
   dvc remote add -f "$p" "s3://dvc-$p-305901448049-$AWS_REGION-an"
 done
 dvc remote default --unset
