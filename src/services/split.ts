@@ -1,8 +1,9 @@
+import type { MigrationConfig } from "../config/configFile.js";
 import type { Region } from "../config/sources.js";
 import { dirMemberMd5s } from "../domain/dirObject.js";
 import { md5ToKey } from "../domain/dvcKey.js";
 import type { DestResolver } from "../domain/plan.js";
-import { UNMATCHED_SUFFIX, generateBucketName } from "../domain/providerMap.js";
+import { UNMATCHED_SUFFIX } from "../domain/providerMap.js";
 import type { GitDvcEntry } from "../ports/gitHistory.js";
 import type { ObjectStore } from "../ports/objectStore.js";
 import { type DirReadError, type ProviderConflict, resolveProviderByMd5 } from "./mapping.js";
@@ -22,6 +23,8 @@ export interface SplitMapping {
 }
 
 export interface BuildSplitMappingInput {
+  config: MigrationConfig;
+
   gitEntries: readonly GitDvcEntry[];
 
   dirMembers?: Readonly<Record<string, readonly string[]>>;
@@ -32,11 +35,12 @@ export function buildSplitMapping(input: BuildSplitMappingInput): SplitMapping {
   const { providerByMd5, conflicts, unknownDirs } = resolveProviderByMd5(
     input.gitEntries,
     input.dirMembers ?? {},
+    input.config,
   );
-  const { region } = input;
+  const { config, region } = input;
 
   const predictBucket = (md5: string): string =>
-    generateBucketName(providerByMd5.get(md5) ?? UNMATCHED_SUFFIX, region);
+    config.generateBucketName(providerByMd5.get(md5) ?? UNMATCHED_SUFFIX, region);
 
   const resolve: DestResolver = ({ md5, sourceKey }) => ({
     destBucket: predictBucket(md5),
@@ -44,9 +48,10 @@ export function buildSplitMapping(input: BuildSplitMappingInput): SplitMapping {
   });
 
   const buckets = new Set<string>();
-  for (const folder of providerByMd5.values()) buckets.add(generateBucketName(folder, region));
+  for (const folder of providerByMd5.values())
+    buckets.add(config.generateBucketName(folder, region));
 
-  buckets.add(generateBucketName(UNMATCHED_SUFFIX, region));
+  buckets.add(config.generateBucketName(UNMATCHED_SUFFIX, region));
 
   return {
     resolve,
@@ -78,12 +83,14 @@ export async function expandDirMembers(
   store: ObjectStore,
   bucket: string,
   dirMd5s: readonly string[],
+  ignoredMd5s: ReadonlySet<string>,
 ): Promise<ExpandDirResult> {
   const members: Record<string, string[]> = {};
   const missingDirs: string[] = [];
   const dirReadErrors: DirReadError[] = [];
 
   for (const dirMd5 of new Set(dirMd5s)) {
+    if (ignoredMd5s.has(dirMd5)) continue;
     let bytes: Uint8Array | undefined;
     let error: string | undefined;
     for (const layout of ["v3", "v2"] as const) {

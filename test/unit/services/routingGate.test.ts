@@ -8,6 +8,7 @@ import {
   verifySharded,
 } from "../../../src/services/sharded.js";
 import { buildSplitMapping } from "../../../src/services/split.js";
+import { retinaConfig } from "../../support/config.js";
 import { FakeObjectStore } from "../../support/fakeObjectStore.js";
 
 const EARNIN = "ee0000000000000000000000000000ee";
@@ -21,10 +22,12 @@ const entry = (md5: string, rootDir: string): GitDvcEntry => ({
   commit: "deadbeef",
 });
 const B = (stub: string): string => bucketName(stub, "us-east-2");
+const config = retinaConfig();
 
 describe("unknownDirs gate (fail-closed routing)", () => {
   it("flags a git folder absent from the provider map as an unknown dir", () => {
     const split = buildSplitMapping({
+      config,
       gitEntries: [entry(EARNIN, "Earnin"), entry(PAYCHEX, "Definitely Not A Source")],
       region: "us-east-2",
     });
@@ -33,6 +36,7 @@ describe("unknownDirs gate (fail-closed routing)", () => {
 
   it("a misspelled private folder is unknown (would fall to public) — the CointOut trap", () => {
     const split = buildSplitMapping({
+      config,
       gitEntries: [entry(EARNIN, "CointOut")],
       region: "us-east-2",
     });
@@ -45,6 +49,7 @@ describe("unknownDirs gate (fail-closed routing)", () => {
 
   it("known folders (provider or public) produce no unknown dirs", () => {
     const split = buildSplitMapping({
+      config,
       gitEntries: [entry(EARNIN, "Earnin"), entry(PAYCHEX, "JOLTS")],
       region: "us-east-2",
     });
@@ -54,7 +59,11 @@ describe("unknownDirs gate (fail-closed routing)", () => {
 
 describe("predictBucket / destination assertion (Phase C)", () => {
   it("predicts the per-provider bucket from md5 alone", () => {
-    const split = buildSplitMapping({ gitEntries: [entry(EARNIN, "Earnin")], region: "us-east-2" });
+    const split = buildSplitMapping({
+      config,
+      gitEntries: [entry(EARNIN, "Earnin")],
+      region: "us-east-2",
+    });
     expect(split.predictBucket(EARNIN)).toBe(B("earnin"));
     expect(split.predictBucket(UNREF)).toBe(B("public"));
   });
@@ -66,7 +75,11 @@ describe("predictBucket / destination assertion (Phase C)", () => {
     await store.ensureBucket(B("public"));
     await store.put(B("public"), md5ToKey(EARNIN, "v2"), "payroll");
 
-    const split = buildSplitMapping({ gitEntries: [entry(EARNIN, "Earnin")], region: "us-east-2" });
+    const split = buildSplitMapping({
+      config,
+      gitEntries: [entry(EARNIN, "Earnin")],
+      region: "us-east-2",
+    });
     const blind = await verifySharded(store, "old", store, B("public"), {
       deep: true,
       newBuckets: split.destBuckets,
@@ -81,7 +94,11 @@ describe("predictBucket / destination assertion (Phase C)", () => {
     await store.ensureBucket(B("public"));
     await store.put(B("public"), md5ToKey(EARNIN, "v2"), "payroll");
 
-    const split = buildSplitMapping({ gitEntries: [entry(EARNIN, "Earnin")], region: "us-east-2" });
+    const split = buildSplitMapping({
+      config,
+      gitEntries: [entry(EARNIN, "Earnin")],
+      region: "us-east-2",
+    });
     const vr = await verifySharded(store, "old", store, B("public"), {
       deep: true,
       newBuckets: split.destBuckets,
@@ -102,7 +119,11 @@ describe("predictBucket / destination assertion (Phase C)", () => {
     await store.ensureBucket(B("public"));
     await store.put(B("public"), md5ToKey(EARNIN, "v2"), "payroll");
 
-    const split = buildSplitMapping({ gitEntries: [entry(EARNIN, "Earnin")], region: "us-east-2" });
+    const split = buildSplitMapping({
+      config,
+      gitEntries: [entry(EARNIN, "Earnin")],
+      region: "us-east-2",
+    });
     const del = await deleteOldAgainstBuckets(store, "old", split.destBuckets, {
       dryRun: false,
       expectBucketByMd5: split.predictBucket,
@@ -122,6 +143,7 @@ describe("private-provider routing with no real data (Phase D synthetic round-tr
     await store.put("old", md5ToKey(UNREF, "v2"), "u-bytes");
 
     const split = buildSplitMapping({
+      config,
       gitEntries: [entry(EARNIN, "Earnin"), entry(PAYCHEX, "Paychex")],
       region: "us-east-2",
     });

@@ -9,5 +9,7 @@ export interface GitDvcEntry {
 }
 
 export interface GitHistory {
-  walk(repoDir: string, subdir: string): Promise<GitDvcEntry[]>;
+  resolveCommit(repoDir: string, commit: string): Promise<string>;
+
+  walk(repoDir: string, subdir: string, commit?: string): Promise<GitDvcEntry[]>;
 }

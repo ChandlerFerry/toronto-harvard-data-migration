@@ -1,0 +1,65 @@
+{
+  "providers": [
+    "affinity",
+    "coinout",
+    "earnin",
+    "homebase",
+    "intuit",
+    "kronos",
+    "lightcast",
+    "paychex",
+    "public",
+    "womply",
+    "zearn"
+  ],
+  "folders": {
+    "ACS 2014-2018 5-Year County": "public",
+    "ACS 2014-2018 5-Year ZCTA": "public",
+    "Affinity": "affinity",
+    "American Time Use Survey": "public",
+    "Burning Glass": "lightcast",
+    "COVID-19": "public",
+    "CPI": "public",
+    "City Crosswalk": "public",
+    "CoinOut": "coinout",
+    "County Population": "public",
+    "County covariates Atlas": "public",
+    "County to CZ Crosswalk - 1990 Vintage": "public",
+    "Earnin": "earnin",
+    "FPL": "public",
+    "Geo Info": "public",
+    "Google Analytics": "public",
+    "Google Mobility": "public",
+    "Holidays": "public",
+    "Homebase": "homebase",
+    "Intuit": "intuit",
+    "JOLTS": "public",
+    "Kronos": "kronos",
+    "Lightcast": "lightcast",
+    "Local Area Unemployment Statistics": "public",
+    "MARTS": "public",
+    "NAICS Crosswalk": "public",
+    "NIPA": "public",
+    "Paychex": "paychex",
+    "QCEW": "public",
+    "Spending MCC to NAICS Crosswalk": "public",
+    "Spending Superindustry Crosswalk": "public",
+    "State Population": "public",
+    "UI Claims": "public",
+    "Womply": "womply",
+    "ZIP to County Crosswalk - Q4 2019 Vintage": "public",
+    "ZIP to ZCTA Crosswalk": "public",
+    "Zearn": "zearn"
+  },
+  "ignoredMd5s": [
+    {
+      "md5": "d41d8cd98f00b204e9800998ecf8427e",
+      "note": "zero-byte file"
+    },
+    {
+      "md5": "d751713988987e9331980363e24189ce.dir",
+      "note": "empty directory listing"
+    }
+  ],
+  "conflictWinners": []
+}

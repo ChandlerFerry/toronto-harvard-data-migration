@@ -1,19 +1,3 @@
-export const SOURCES = [
-  "affinity",
-  "coinout",
-  "earnin",
-  "homebase",
-  "intuit",
-  "kronos",
-  "lightcast",
-  "paychex",
-  "public",
-  "womply",
-  "zearn",
-] as const;
-
-export type Source = (typeof SOURCES)[number];
-
 export const ACCOUNTS = {
   old: "290048929476",
 
@@ -28,8 +12,4 @@ export const ACCOUNT_REGIONAL_MARKER = "an";
 
 export function bucketName(stub: string, region: Region): string {
   return `${BUCKET_PREFIX}-${stub}-${ACCOUNTS.new}-${region}-${ACCOUNT_REGIONAL_MARKER}`;
-}
-
-export function isSource(value: string): value is Source {
-  return (SOURCES as readonly string[]).includes(value);
 }

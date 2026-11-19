@@ -1,6 +1,6 @@
+import type { MigrationConfig } from "../config/configFile.js";
 import type { Region } from "../config/sources.js";
 import { tryKeyToMd5 } from "../domain/dvcKey.js";
-import { folderToSuffix, generateBucketName, isKnownFolder } from "../domain/providerMap.js";
 import type { GitDvcEntry } from "../ports/gitHistory.js";
 
 export interface MappedObject {
@@ -50,6 +50,8 @@ export class MappingValidationError extends Error {
 }
 
 export interface BuildMappingInput {
+  config: MigrationConfig;
+
   gitEntries: readonly GitDvcEntry[];
   storeKeys: readonly string[];
   region: Region;
@@ -63,13 +65,20 @@ const UNREFERENCED_PROVIDER = "public";
 
 export function resolveProviderByMd5(
   gitEntries: readonly GitDvcEntry[],
-  dirMembers: Readonly<Record<string, readonly string[]>> = {},
+  dirMembers: Readonly<Record<string, readonly string[]>>,
+  config: MigrationConfig,
 ): { providerByMd5: Map<string, string>; conflicts: ProviderConflict[]; unknownDirs: string[] } {
   const providerByMd5 = new Map<string, string>();
   const conflictProviders = new Map<string, Set<string>>();
   const unknownDirSet = new Set<string>();
 
   const assign = (md5: string, provider: string): void => {
+    if (config.ignoredMd5s.has(md5)) return;
+    const winner = config.conflictWinners.get(md5);
+    if (winner !== undefined) {
+      providerByMd5.set(md5, winner);
+      return;
+    }
     const current = providerByMd5.get(md5);
     if (current === undefined) {
       providerByMd5.set(md5, provider);
@@ -82,7 +91,7 @@ export function resolveProviderByMd5(
 
   for (const e of gitEntries) {
     assign(e.md5, e.rootDir);
-    if (!isKnownFolder(e.rootDir)) unknownDirSet.add(e.rootDir);
+    if (!config.isKnownFolder(e.rootDir)) unknownDirSet.add(e.rootDir);
   }
 
   for (const [dirMd5, members] of Object.entries(dirMembers)) {
@@ -102,6 +111,7 @@ export function buildMapping(input: BuildMappingInput): MappingResult {
   const { providerByMd5, conflicts, unknownDirs } = resolveProviderByMd5(
     input.gitEntries,
     input.dirMembers ?? {},
+    input.config,
   );
 
   const storeMd5 = new Set<string>();
@@ -117,16 +127,17 @@ export function buildMapping(input: BuildMappingInput): MappingResult {
   for (const key of input.storeKeys) {
     const md5 = tryKeyToMd5(key);
     if (md5 === null) continue;
-    const provider = providerByMd5.get(md5);
+    const routed = providerByMd5.get(md5);
     let folder: string;
-    if (provider === undefined) {
+    if (routed === undefined) {
       unreferencedKeys.push(key);
       folder = UNREFERENCED_PROVIDER;
     } else {
-      folder = provider;
+      folder = routed;
     }
-    const destBucket = generateBucketName(folder, input.region);
-    mapped.push({ md5, sourceKey: key, provider: folderToSuffix(folder), destBucket });
+    const destBucket = input.config.generateBucketName(folder, input.region);
+    const provider = input.config.folderToSuffix(folder);
+    mapped.push({ md5, sourceKey: key, provider, destBucket });
     providerCounts[destBucket] = (providerCounts[destBucket] ?? 0) + 1;
   }
 

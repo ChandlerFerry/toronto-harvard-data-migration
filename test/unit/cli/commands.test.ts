@@ -1,4 +1,5 @@
-import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -14,6 +15,11 @@ import { bucketName } from "../../../src/config/sources.js";
 import { md5ToKey } from "../../../src/domain/dvcKey.js";
 import type { GitDvcEntry, GitHistory } from "../../../src/ports/gitHistory.js";
 import type { RepointDeps } from "../../../src/services/repoint.js";
+import {
+  type ConfigOverrides,
+  RETINA_CONFIG_PATH,
+  retinaConfigText,
+} from "../../support/config.js";
 import { FakeObjectStore } from "../../support/fakeObjectStore.js";
 
 const A = "aa11111111111111111111111111111a";
@@ -38,7 +44,10 @@ function makeDeps(store: FakeObjectStore, reportDir: string, git?: GitHistory): 
 }
 
 function fakeGit(entries: GitDvcEntry[]): GitHistory {
-  return { walk: () => Promise.resolve(entries) };
+  return {
+    resolveCommit: (_repo, commit) => Promise.resolve(commit),
+    walk: () => Promise.resolve(entries),
+  };
 }
 function entry(md5: string, rootDir: string): GitDvcEntry {
   return { md5, rootDir, path: `data/dvc/${rootDir}/f.dvc`, commit: "deadbeef" };
@@ -51,6 +60,13 @@ async function tmpDir(): Promise<string> {
   tmps.push(d);
   return d;
 }
+async function writeConfig(text: string): Promise<string> {
+  const path = join(await tmpDir(), "config.json");
+  await writeFile(path, text);
+  return path;
+}
+const configWith = (overrides: ConfigOverrides): Promise<string> =>
+  writeConfig(retinaConfigText(overrides));
 async function reportFiles(dir: string): Promise<string[]> {
   return (await readdir(dir)).filter((f) => f.endsWith(".run-report.json"));
 }
@@ -101,6 +117,8 @@ describe("dvc-migrate (provider-split, memory-sharded, deep — the only path)",
       "old-remote",
       "--git-repo",
       "/repo",
+      "--config",
+      RETINA_CONFIG_PATH,
     ]);
 
     expect((await store.list(AFFINITY)).map((o) => o.key)).toEqual([md5ToKey(A, "v2")]);
@@ -132,6 +150,8 @@ describe("dvc-migrate (provider-split, memory-sharded, deep — the only path)",
       "--git-repo",
       "/repo",
       "--allow-unreferenced",
+      "--config",
+      RETINA_CONFIG_PATH,
     ]);
 
     expect((await store.list(PUBLIC)).map((o) => o.key)).toEqual([md5ToKey(C, "v2")]);
@@ -151,7 +171,16 @@ describe("dvc-migrate (provider-split, memory-sharded, deep — the only path)",
 
     await makeMigrateCommand(
       makeDeps(store, dir, fakeGit([entry(A, "Affinity"), entry(DIR, "CoinOut")])),
-    ).parseAsync(["node", "dvc-migrate", "--old", "old-remote", "--git-repo", "/repo"]);
+    ).parseAsync([
+      "node",
+      "dvc-migrate",
+      "--old",
+      "old-remote",
+      "--git-repo",
+      "/repo",
+      "--config",
+      RETINA_CONFIG_PATH,
+    ]);
 
     expect(process.exitCode).toBe(0);
     expect((await store.list(AFFINITY)).map((o) => o.key)).toEqual([md5ToKey(A, "v2")]);
@@ -168,7 +197,16 @@ describe("dvc-migrate (provider-split, memory-sharded, deep — the only path)",
 
     await makeMigrateCommand(
       makeDeps(store, dir, fakeGit([entry(A, "Affinity"), entry(A, "Zearn")])),
-    ).parseAsync(["node", "dvc-migrate", "--old", "old-remote", "--git-repo", "/repo"]);
+    ).parseAsync([
+      "node",
+      "dvc-migrate",
+      "--old",
+      "old-remote",
+      "--git-repo",
+      "/repo",
+      "--config",
+      RETINA_CONFIG_PATH,
+    ]);
 
     expect(process.exitCode).toBe(1);
     let copied = 0;
@@ -199,6 +237,8 @@ describe("dvc-migrate (provider-split, memory-sharded, deep — the only path)",
       "old-remote",
       "--git-repo",
       "/repo",
+      "--config",
+      RETINA_CONFIG_PATH,
     ]);
 
     const { rows } = await readReport(dir);
@@ -222,6 +262,8 @@ describe("dvc-migrate (provider-split, memory-sharded, deep — the only path)",
       "/repo",
       "--concurrency",
       "0",
+      "--config",
+      RETINA_CONFIG_PATH,
     ]);
 
     expect((await store.list(AFFINITY)).length).toBe(1);
@@ -231,7 +273,10 @@ describe("dvc-migrate (provider-split, memory-sharded, deep — the only path)",
   it("writes an abort report (exit 1) when git history cannot be read", async () => {
     const store = new FakeObjectStore();
     await store.ensureBucket("old-remote");
-    const git: GitHistory = { walk: () => Promise.reject(new Error("not a git repository")) };
+    const git: GitHistory = {
+      resolveCommit: (_repo, commit) => Promise.resolve(commit),
+      walk: () => Promise.reject(new Error("not a git repository")),
+    };
     const dir = await tmpDir();
 
     await makeMigrateCommand(makeDeps(store, dir, git)).parseAsync([
@@ -241,6 +286,8 @@ describe("dvc-migrate (provider-split, memory-sharded, deep — the only path)",
       "old-remote",
       "--git-repo",
       "/repo",
+      "--config",
+      RETINA_CONFIG_PATH,
     ]);
 
     expect(process.exitCode).toBe(1);
@@ -263,6 +310,8 @@ describe("dvc-verify (provider-split union gate)", () => {
       "old-remote",
       "--git-repo",
       "/repo",
+      "--config",
+      RETINA_CONFIG_PATH,
     ]);
 
     expect(process.exitCode).toBe(0);
@@ -288,6 +337,8 @@ describe("dvc-verify (provider-split union gate)", () => {
       "old-remote",
       "--git-repo",
       "/repo",
+      "--config",
+      RETINA_CONFIG_PATH,
     ]);
 
     expect(process.exitCode).toBe(1);
@@ -306,6 +357,8 @@ describe("dvc-delete safety (provider-split)", () => {
       "dvc-delete",
       "--old",
       "old-remote",
+      "--config",
+      RETINA_CONFIG_PATH,
     ]);
 
     expect((await store.list("old-remote")).length).toBe(3);
@@ -326,6 +379,8 @@ describe("dvc-delete safety (provider-split)", () => {
       "--git-repo",
       "/repo",
       "--no-dry-run",
+      "--config",
+      RETINA_CONFIG_PATH,
     ]);
 
     expect((await store.list("old-remote")).length).toBe(0);
@@ -352,6 +407,8 @@ describe("dvc-delete safety (provider-split)", () => {
       "--git-repo",
       "/repo",
       "--no-dry-run",
+      "--config",
+      RETINA_CONFIG_PATH,
     ]);
 
     expect(process.exitCode).toBe(0);
@@ -375,6 +432,8 @@ describe("dvc-delete safety (provider-split)", () => {
       "--git-repo",
       "/repo",
       "--no-dry-run",
+      "--config",
+      RETINA_CONFIG_PATH,
     ]);
 
     expect(process.exitCode).toBe(1);
@@ -394,6 +453,8 @@ describe("dvc-delete safety (provider-split)", () => {
       "dvc-delete",
       "--old",
       "old-remote",
+      "--config",
+      RETINA_CONFIG_PATH,
     ]);
 
     expect(process.exitCode).toBe(1);
@@ -420,6 +481,8 @@ describe("dvc-delete safety (provider-split)", () => {
       "--git-repo",
       "/repo",
       "--no-dry-run",
+      "--config",
+      RETINA_CONFIG_PATH,
     ]);
 
     expect(process.exitCode).toBe(1);
@@ -445,6 +508,8 @@ describe("dvc-delete safety (provider-split)", () => {
       "--git-repo",
       "/repo",
       "--no-dry-run",
+      "--config",
+      RETINA_CONFIG_PATH,
     ]);
 
     expect(process.exitCode).toBe(1);
@@ -463,6 +528,8 @@ describe("dvc-delete safety (provider-split)", () => {
       "--old",
       "old-remote",
       "--no-dry-run",
+      "--config",
+      RETINA_CONFIG_PATH,
     ]);
 
     expect(process.exitCode).toBe(1);
@@ -499,6 +566,8 @@ describe("incremental --provider scoping (single-provider migrate/verify/delete)
       "/repo",
       "--provider",
       "coinout",
+      "--config",
+      RETINA_CONFIG_PATH,
     ]);
 
     expect((await store.list(COINOUT)).map((o) => o.key)).toEqual([md5ToKey(B, "v2")]);
@@ -536,6 +605,8 @@ describe("incremental --provider scoping (single-provider migrate/verify/delete)
       "/repo",
       "--provider",
       "affinity",
+      "--config",
+      RETINA_CONFIG_PATH,
     ]);
 
     expect(process.exitCode).toBe(0);
@@ -559,6 +630,8 @@ describe("incremental --provider scoping (single-provider migrate/verify/delete)
       "--git-repo",
       "/repo",
       "--no-dry-run",
+      "--config",
+      RETINA_CONFIG_PATH,
     ]);
 
     expect(process.exitCode).toBe(0);
@@ -585,6 +658,8 @@ describe("incremental --provider scoping (single-provider migrate/verify/delete)
       "--provider",
       "not-a-provider",
       "--no-dry-run",
+      "--config",
+      RETINA_CONFIG_PATH,
     ]);
 
     expect(process.exitCode).toBe(1);
@@ -592,6 +667,375 @@ describe("incremental --provider scoping (single-provider migrate/verify/delete)
     const { summary } = await readReport(dir);
     expect(summary.aborted).toBe(true);
     expect(summary.reason).toMatch(/unknown provider/);
+  });
+});
+
+describe("--config (the config file every command reads)", () => {
+  async function seedOld(store: FakeObjectStore): Promise<void> {
+    await store.ensureBucket("old-remote");
+    await store.put("old-remote", md5ToKey(A, "v2"), "alpha");
+    await store.put("old-remote", md5ToKey(B, "v2"), "beta");
+  }
+  const migrate = (store: FakeObjectStore, dir: string, config: string, ...args: string[]) =>
+    makeMigrateCommand(makeDeps(store, dir, fakeGit(PROVIDERS))).parseAsync([
+      "node",
+      "dvc-migrate",
+      "--old",
+      "old-remote",
+      "--git-repo",
+      "/repo",
+      "--config",
+      config,
+      ...args,
+    ]);
+  const bucketCount = async (store: FakeObjectStore, bucket: string): Promise<number> => {
+    try {
+      return (await store.list(bucket)).length;
+    } catch {
+      return 0;
+    }
+  };
+
+  it.each([
+    ["migrate", makeMigrateCommand, ["--old", "old-remote", "--git-repo", "/repo"]],
+    ["verify", makeVerifyCommand, ["--old", "old-remote", "--git-repo", "/repo"]],
+    ["delete", makeDeleteCommand, ["--old", "old-remote"]],
+    ["map", makeMapCommand, ["--old", "old-remote", "--git-repo", "/repo"]],
+    ["repoint", makeRepointCommand, ["--git-repo", "/repo"]],
+  ] as const)("%s refuses to run without it", async (_name, make, args) => {
+    const command = make(makeDeps(new FakeObjectStore(), await tmpDir(), fakeGit(PROVIDERS)))
+      .exitOverride()
+      .configureOutput({ writeErr: () => {} });
+
+    await expect(command.parseAsync(["node", "dvcm", ...args])).rejects.toThrow(/--config/);
+  });
+
+  it("records the file's path and checksum in the run report", async () => {
+    const store = new FakeObjectStore();
+    await seedOld(store);
+    const dir = await tmpDir();
+
+    await migrate(store, dir, RETINA_CONFIG_PATH);
+
+    const sha256 = createHash("sha256")
+      .update(await readFile(RETINA_CONFIG_PATH))
+      .digest("hex");
+    expect((await readReport(dir)).summary.config).toEqual({ path: RETINA_CONFIG_PATH, sha256 });
+    expect(process.exitCode).toBe(0);
+  });
+
+  it("routes by the folder table in the file, not one built into the tool", async () => {
+    const store = new FakeObjectStore();
+    await seedOld(store);
+    const dir = await tmpDir();
+    const config = await configWith({ folders: { Affinity: "public", CoinOut: "coinout" } });
+
+    await migrate(store, dir, config);
+
+    expect((await store.list(PUBLIC)).map((o) => o.key)).toEqual([md5ToKey(A, "v2")]);
+    expect(await bucketCount(store, AFFINITY)).toBe(0);
+    expect(process.exitCode).toBe(0);
+  });
+
+  it("accepts --provider only for a provider the file lists", async () => {
+    const store = new FakeObjectStore();
+    await seedOld(store);
+    const dir = await tmpDir();
+    const config = await configWith({
+      providers: ["affinity", "public"],
+      folders: { Affinity: "affinity", CoinOut: "public" },
+    });
+
+    await migrate(store, dir, config, "--provider", "coinout");
+
+    expect(process.exitCode).toBe(1);
+    const { summary } = await readReport(dir);
+    expect(summary.aborted).toBe(true);
+    expect(summary.reason).toMatch(/unknown provider "coinout".*affinity, public/);
+    expect(await bucketCount(store, COINOUT)).toBe(0);
+  });
+
+  it("aborts (exit 1, nothing copied) on a file that fails validation", async () => {
+    const store = new FakeObjectStore();
+    await seedOld(store);
+    const dir = await tmpDir();
+    const config = await writeConfig(
+      JSON.stringify({ ...JSON.parse(retinaConfigText()), conflictWinner: [] }),
+    );
+
+    await migrate(store, dir, config);
+
+    expect(process.exitCode).toBe(1);
+    const { summary } = await readReport(dir);
+    expect(summary.aborted).toBe(true);
+    expect(summary.reason).toMatch(/conflictWinner/);
+    expect(await bucketCount(store, AFFINITY)).toBe(0);
+  });
+
+  it.each([
+    ["migrate", makeMigrateCommand, ["--old", "old-remote", "--git-repo", "/repo"]],
+    ["verify", makeVerifyCommand, ["--old", "old-remote", "--git-repo", "/repo"]],
+    ["delete", makeDeleteCommand, ["--old", "old-remote", "--git-repo", "/repo", "--no-dry-run"]],
+    ["map", makeMapCommand, ["--old", "old-remote", "--git-repo", "/repo"]],
+    ["repoint", makeRepointCommand, ["--git-repo", "/repo"]],
+  ] as const)(
+    "%s stops on an invalid file before touching the store, git or any .dvc file",
+    async (_name, make, args) => {
+      const touched: string[] = [];
+      const untouchable = <T extends object>(what: string): T =>
+        new Proxy({} as T, {
+          get: (_target, prop) => () => {
+            touched.push(`${what}.${String(prop)}`);
+            throw new Error(`${what} touched`);
+          },
+        });
+      const dir = await tmpDir();
+      const deps: CliDeps = {
+        ...makeDeps(new FakeObjectStore(), dir),
+        makeStore: () => untouchable<FakeObjectStore>("store"),
+        gitHistory: untouchable<GitHistory>("git"),
+        repoint: untouchable<RepointDeps>("repoint"),
+      };
+      const config = await writeConfig("{ not json");
+
+      await make(deps).parseAsync(["node", "dvcm", ...args, "--config", config]);
+
+      expect(touched).toEqual([]);
+      expect(process.exitCode).toBe(1);
+      const { summary } = await readReport(dir);
+      expect(summary.aborted).toBe(true);
+      expect(summary.config).toEqual({ path: config });
+    },
+  );
+
+  it("aborts (exit 1, nothing copied) when the file does not exist", async () => {
+    const store = new FakeObjectStore();
+    await seedOld(store);
+    const dir = await tmpDir();
+
+    await migrate(store, dir, join(dir, "missing.json"));
+
+    expect(process.exitCode).toBe(1);
+    expect((await readReport(dir)).summary.reason).toMatch(/missing\.json/);
+    expect(await bucketCount(store, AFFINITY)).toBe(0);
+  });
+
+  it("applies the ignore list: an ignored md5 named by two providers does not stop migrate", async () => {
+    const empty = "d41d8cd98f00b204e9800998ecf8427e";
+    const store = new FakeObjectStore();
+    await seedOld(store);
+    await store.put("old-remote", md5ToKey(empty, "v2"), "");
+    const dir = await tmpDir();
+    const git = fakeGit([...PROVIDERS, entry(empty, "Affinity"), entry(empty, "Zearn")]);
+
+    await makeMigrateCommand(makeDeps(store, dir, git)).parseAsync([
+      "node",
+      "dvc-migrate",
+      "--old",
+      "old-remote",
+      "--git-repo",
+      "/repo",
+      "--config",
+      RETINA_CONFIG_PATH,
+    ]);
+
+    expect(process.exitCode).toBe(0);
+    const { summary } = await readReport(dir);
+    expect(summary.copied).toBe(2);
+    expect(summary.unreferencedSkipped).toBe(1);
+    expect((await store.list("old-remote")).length).toBe(3);
+  });
+});
+
+describe("--commit (snapshot walk of one commit)", () => {
+  const SHA = "5ca1ab1e5ca1ab1e5ca1ab1e5ca1ab1e5ca1ab1e";
+
+  function recordingGit(entries: GitDvcEntry[]) {
+    const resolved: string[] = [];
+    const walked: (string | undefined)[] = [];
+    const git: GitHistory = {
+      resolveCommit: (_repo, commit) => {
+        resolved.push(commit);
+        return Promise.resolve(SHA);
+      },
+      walk: (_repo, _subdir, commit) => {
+        walked.push(commit);
+        return Promise.resolve(entries);
+      },
+    };
+    return { git, resolved, walked };
+  }
+  async function seedOld(store: FakeObjectStore): Promise<void> {
+    await store.ensureBucket("old-remote");
+    await store.put("old-remote", md5ToKey(A, "v2"), "alpha");
+    await store.put("old-remote", md5ToKey(B, "v2"), "beta");
+  }
+  const common = ["--old", "old-remote", "--git-repo", "/repo", "--config", RETINA_CONFIG_PATH];
+  const bucketCount = async (store: FakeObjectStore, bucket: string): Promise<number> => {
+    try {
+      return (await store.list(bucket)).length;
+    } catch {
+      return 0;
+    }
+  };
+
+  it("migrate walks only the commit the name resolves to, and records its sha", async () => {
+    const store = new FakeObjectStore();
+    await seedOld(store);
+    const dir = await tmpDir();
+    const { git, resolved, walked } = recordingGit(PROVIDERS);
+
+    await makeMigrateCommand(makeDeps(store, dir, git)).parseAsync([
+      "node",
+      "dvc-migrate",
+      ...common,
+      "--commit",
+      "main",
+    ]);
+
+    expect(resolved).toEqual(["main"]);
+    expect(walked).toEqual([SHA]);
+    const { summary } = await readReport(dir);
+    expect(summary.commit).toBe(SHA);
+    expect(summary.copied).toBe(2);
+    expect(process.exitCode).toBe(0);
+  });
+
+  it("without it, the walk covers every commit and the report names none", async () => {
+    const store = new FakeObjectStore();
+    await seedOld(store);
+    const dir = await tmpDir();
+    const { git, resolved, walked } = recordingGit(PROVIDERS);
+
+    await makeMigrateCommand(makeDeps(store, dir, git)).parseAsync([
+      "node",
+      "dvc-migrate",
+      ...common,
+    ]);
+
+    expect(resolved).toEqual([]);
+    expect(walked).toEqual([undefined]);
+    expect((await readReport(dir)).summary).not.toHaveProperty("commit");
+  });
+
+  it("is refused with --allow-unreferenced (exit 1, nothing walked or copied)", async () => {
+    const store = new FakeObjectStore();
+    await seedOld(store);
+    const dir = await tmpDir();
+    const { git, walked } = recordingGit(PROVIDERS);
+
+    await makeMigrateCommand(makeDeps(store, dir, git)).parseAsync([
+      "node",
+      "dvc-migrate",
+      ...common,
+      "--commit",
+      "main",
+      "--allow-unreferenced",
+    ]);
+
+    expect(process.exitCode).toBe(1);
+    const { summary } = await readReport(dir);
+    expect(summary.aborted).toBe(true);
+    expect(summary.reason).toMatch(/--commit.*--allow-unreferenced/);
+    expect(summary.requestedCommit).toBe("main");
+    expect(summary).not.toHaveProperty("commit");
+    expect(walked).toEqual([]);
+    expect(await bucketCount(store, AFFINITY)).toBe(0);
+  });
+
+  it("aborts (exit 1, nothing copied) when the name is not a commit", async () => {
+    const store = new FakeObjectStore();
+    await seedOld(store);
+    const dir = await tmpDir();
+    const git: GitHistory = {
+      resolveCommit: () => Promise.reject(new Error('Cannot resolve --commit "nope"')),
+      walk: () => Promise.resolve(PROVIDERS),
+    };
+
+    await makeMigrateCommand(makeDeps(store, dir, git)).parseAsync([
+      "node",
+      "dvc-migrate",
+      ...common,
+      "--commit",
+      "nope",
+    ]);
+
+    expect(process.exitCode).toBe(1);
+    const { summary } = await readReport(dir);
+    expect(summary.reason).toMatch(/Cannot resolve --commit "nope"/);
+    expect(summary.requestedCommit).toBe("nope");
+    expect(await bucketCount(store, AFFINITY)).toBe(0);
+  });
+
+  it.each([
+    ["verify", makeVerifyCommand],
+    ["map", makeMapCommand],
+  ] as const)("%s walks the same single commit and records its sha", async (_name, make) => {
+    const store = new FakeObjectStore();
+    await seedMigrated(store);
+    const dir = await tmpDir();
+    const { git, walked } = recordingGit(PROVIDERS);
+
+    await make(makeDeps(store, dir, git)).parseAsync([
+      "node",
+      "dvcm",
+      ...common,
+      "--commit",
+      "main",
+    ]);
+
+    expect(walked).toEqual([SHA]);
+    expect((await readReport(dir)).summary.commit).toBe(SHA);
+  });
+
+  it("delete --no-dry-run after a one-commit migrate drains what was copied and leaves the rest in OLD", async () => {
+    const store = new FakeObjectStore();
+    await seedOld(store);
+    await store.put("old-remote", md5ToKey(C, "v2"), "named only by other commits");
+    const { git, walked } = recordingGit(PROVIDERS);
+    await makeMigrateCommand(makeDeps(store, await tmpDir(), git)).parseAsync([
+      "node",
+      "dvc-migrate",
+      ...common,
+      "--commit",
+      "main",
+    ]);
+    const dir = await tmpDir();
+
+    await makeDeleteCommand(makeDeps(store, dir, git)).parseAsync([
+      "node",
+      "dvc-delete",
+      ...common,
+      "--commit",
+      "main",
+      "--no-dry-run",
+    ]);
+
+    expect(walked).toEqual([SHA, SHA]);
+    expect((await store.list("old-remote")).map((o) => o.key)).toEqual([md5ToKey(C, "v2")]);
+    expect((await readReport(dir)).summary.commit).toBe(SHA);
+    expect(process.exitCode).toBe(0);
+  });
+
+  it("delete refuses it without --git-repo (exit 1, nothing deleted)", async () => {
+    const store = new FakeObjectStore();
+    await seedMigrated(store);
+    const dir = await tmpDir();
+
+    await makeDeleteCommand(makeDeps(store, dir)).parseAsync([
+      "node",
+      "dvc-delete",
+      "--old",
+      "old-remote",
+      "--config",
+      RETINA_CONFIG_PATH,
+      "--commit",
+      "main",
+    ]);
+
+    expect(process.exitCode).toBe(1);
+    expect((await readReport(dir)).summary.reason).toMatch(/--commit requires --git-repo/);
+    expect((await store.list("old-remote")).length).toBe(3);
   });
 });
 
@@ -620,6 +1064,8 @@ describe("dvc-map gate-failing items in the report", () => {
       "/repo",
       "--old",
       "old-remote",
+      "--config",
+      RETINA_CONFIG_PATH,
     ]);
 
     expect(process.exitCode).toBe(1);
@@ -632,7 +1078,10 @@ describe("dvc-map gate-failing items in the report", () => {
   it("writes an abort report (and exits 1) when git history cannot be read", async () => {
     const store = new FakeObjectStore();
     await store.ensureBucket("old-remote");
-    const git: GitHistory = { walk: () => Promise.reject(new Error("not a git repository")) };
+    const git: GitHistory = {
+      resolveCommit: (_repo, commit) => Promise.resolve(commit),
+      walk: () => Promise.reject(new Error("not a git repository")),
+    };
     const dir = await tmpDir();
 
     await makeMapCommand(makeDeps(store, dir, git)).parseAsync([
@@ -642,6 +1091,8 @@ describe("dvc-map gate-failing items in the report", () => {
       "/repo",
       "--old",
       "old-remote",
+      "--config",
+      RETINA_CONFIG_PATH,
     ]);
 
     expect(process.exitCode).toBe(1);
@@ -662,7 +1113,16 @@ describe("fail-closed routing gate (unknown dirs + corrupt .dir)", () => {
 
     await makeMigrateCommand(
       makeDeps(store, dir, fakeGit([entry(A, "Mystery Source")])),
-    ).parseAsync(["node", "dvc-migrate", "--old", "old-remote", "--git-repo", "/repo"]);
+    ).parseAsync([
+      "node",
+      "dvc-migrate",
+      "--old",
+      "old-remote",
+      "--git-repo",
+      "/repo",
+      "--config",
+      RETINA_CONFIG_PATH,
+    ]);
 
     expect(process.exitCode).toBe(1);
     const { summary, rows } = await readReport(dir);
@@ -692,6 +1152,8 @@ describe("fail-closed routing gate (unknown dirs + corrupt .dir)", () => {
       "--git-repo",
       "/repo",
       "--allow-unknown-dirs",
+      "--config",
+      RETINA_CONFIG_PATH,
     ]);
 
     expect(process.exitCode).toBe(0);
@@ -704,7 +1166,16 @@ describe("fail-closed routing gate (unknown dirs + corrupt .dir)", () => {
     const dir = await tmpDir();
 
     await makeVerifyCommand(makeDeps(store, dir, fakeGit([entry(A, "Mystery Source")]))).parseAsync(
-      ["node", "dvc-verify", "--old", "old-remote", "--git-repo", "/repo"],
+      [
+        "node",
+        "dvc-verify",
+        "--old",
+        "old-remote",
+        "--git-repo",
+        "/repo",
+        "--config",
+        RETINA_CONFIG_PATH,
+      ],
     );
 
     expect(process.exitCode).toBe(1);
@@ -724,6 +1195,8 @@ describe("fail-closed routing gate (unknown dirs + corrupt .dir)", () => {
       "old-remote",
       "--git-repo",
       "/repo",
+      "--config",
+      RETINA_CONFIG_PATH,
     ]);
 
     expect(process.exitCode).toBe(1);
@@ -754,14 +1227,18 @@ describe("dvc-repoint (per-out remote: field, repo plane)", () => {
     ...makeDeps(new FakeObjectStore(), reportDir),
     repoint: repointDeps(files),
   });
-  const run = (files: Map<string, string>, dir: string, ...args: string[]) =>
+  const runWith = (config: string, files: Map<string, string>, dir: string, ...args: string[]) =>
     makeRepointCommand(depsWith(files, dir)).parseAsync([
       "node",
       "dvc-repoint",
       "--git-repo",
       "/repo",
+      "--config",
+      config,
       ...args,
     ]);
+  const run = (files: Map<string, string>, dir: string, ...args: string[]) =>
+    runWith(RETINA_CONFIG_PATH, files, dir, ...args);
 
   it("sets remote: <provider> on each .dvc WITHOUT touching the hash format", async () => {
     const files = new Map([
@@ -852,6 +1329,71 @@ describe("dvc-repoint (per-out remote: field, repo plane)", () => {
     await run(files, dir, "--allow-unknown-dirs");
 
     expect(files.get(P_MYSTERY)).toMatch(/remote: public/);
+    expect(process.exitCode).toBe(0);
+  });
+
+  describe("an md5 on the winner list", () => {
+    const P_PINNED = "/repo/data/dvc/Earnin/Files for paper/pinned.dta.dvc";
+    const P_EARNIN = "/repo/data/dvc/Earnin/e.zip.dvc";
+    const pinned = `outs:\n- md5: ${A}\n  path: pinned.dta\n`;
+    const winners = { conflictWinners: [{ md5: A, folder: "JOLTS", note: "also under Earnin" }] };
+
+    it("gets the winner's remote, not its own folder's", async () => {
+      const files = new Map([
+        [P_PINNED, pinned],
+        [P_EARNIN, v2],
+      ]);
+      const dir = await tmpDir();
+
+      await runWith(await configWith(winners), files, dir);
+
+      expect(files.get(P_PINNED)).toMatch(/remote: public/);
+      expect(files.get(P_EARNIN)).toMatch(/remote: earnin/);
+      expect(process.exitCode).toBe(0);
+    });
+
+    it("keeps its own folder's remote when the config file lists no winners", async () => {
+      const files = new Map([[P_PINNED, pinned]]);
+      const dir = await tmpDir();
+
+      await run(files, dir);
+
+      expect(files.get(P_PINNED)).toMatch(/remote: earnin/);
+    });
+
+    it("is scoped by --provider through the winner", async () => {
+      const files = new Map([
+        [P_PINNED, pinned],
+        [P_EARNIN, v2],
+      ]);
+      const config = await configWith(winners);
+      const dir = await tmpDir();
+
+      await runWith(config, files, dir, "--provider", "earnin");
+
+      expect(files.get(P_PINNED)).toBe(pinned);
+      expect(files.get(P_EARNIN)).toMatch(/remote: earnin/);
+      const dir2 = await tmpDir();
+
+      await runWith(config, files, dir2, "--provider", "public");
+
+      expect(files.get(P_PINNED)).toMatch(/remote: public/);
+      expect((await readReport(dir2)).summary.repointed).toBe(1);
+    });
+  });
+
+  it("--provider ignores an unsupported .dvc under another provider's folder", async () => {
+    const files = new Map([
+      ["/repo/data/dvc/Kronos/c.csv.dvc", v1],
+      [P_PUB, v2],
+    ]);
+    const dir = await tmpDir();
+
+    await run(files, dir, "--provider", "public");
+
+    const { summary } = await readReport(dir);
+    expect(summary.errors).toBe(0);
+    expect(summary.repointed).toBe(1);
     expect(process.exitCode).toBe(0);
   });
 

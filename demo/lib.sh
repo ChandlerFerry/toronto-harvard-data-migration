@@ -55,7 +55,8 @@ err()  { printf '%s%s%s\n' "$C_RED" "$*" "$C_RESET" >&2; }
 awsls() { aws --endpoint-url "$AWS_ENDPOINT_URL" --region "$AWS_REGION" "$@"; }
 
 # Runner for the migration CLI subcommands (map/migrate/verify/delete/repoint).
-cli() { pnpm -s exec tsx "$REPO_ROOT/src/cli/main.ts" "$@"; }
+CONFIG_FILE="${CONFIG_FILE:-$REPO_ROOT/config/retina-routing.json}"
+cli() { pnpm -s exec tsx "$REPO_ROOT/src/cli/main.ts" "$@" --config "$CONFIG_FILE"; }
 
 # Object count + total bytes for a bucket ("0 0" if absent/empty). Robust to the
 # bucket not existing yet (before the migrate creates the provider buckets).
