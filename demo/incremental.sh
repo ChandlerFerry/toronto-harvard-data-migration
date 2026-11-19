@@ -48,7 +48,7 @@ if [ ! -s "$PLAN_FILE" ] || [ ! -d "$FIXTURE_DIR" ]; then
 
   note "planning providers by NAME (present in the monolith; public last)…"
   cli map --git-repo "$FIXTURE_DIR" --old "$OLD_BUCKET" --region "$AWS_REGION" >/dev/null 2>&1
-  node --import tsx "$REPO_ROOT/demo/plan-providers.ts" "$REPORT_DIR" "$AWS_REGION" >"$PLAN_FILE"
+  node --import tsx "$REPO_ROOT/demo/plan-providers.ts" "$REPORT_DIR" "$AWS_REGION" "$CONFIG_FILE" >"$PLAN_FILE"
   : >"$DONE_FILE" # fresh plan → empty progress
 fi
 touch "$DONE_FILE"

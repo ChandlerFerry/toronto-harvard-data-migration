@@ -1,6 +1,6 @@
 import { join, relative, sep } from "node:path";
+import type { MigrationConfig } from "../config/configFile.js";
 import { parseDotDvc, serializeDotDvc, setRemote } from "../domain/dotDvcFile.js";
-import { folderToSuffix, isKnownFolder } from "../domain/providerMap.js";
 
 export interface RepointDeps {
   listDvcFiles: (repoDir: string, subdir: string) => Promise<string[]>;
@@ -22,12 +22,14 @@ export interface RepointEntry {
 }
 
 // Sets `remote: <provider stub>` on each .dvc out, named after the bucket migrate routed
-// its folder to. The hash format is left alone: DVC 3 only reads v2 (no `hash:`) outs
-// from the legacy key layout that migrate copies verbatim.
+// it to: its folder's bucket, or the winner's for an md5 on the winner list. The hash
+// format is left alone: DVC 3 only reads v2 (no `hash:`) outs from the legacy key layout
+// that migrate copies verbatim.
 export async function repointAll(
   deps: RepointDeps,
   repoDir: string,
   subdir: string,
+  config: MigrationConfig,
   opts: RepointOptions = {},
 ): Promise<RepointEntry[]> {
   const root = join(repoDir, subdir);
@@ -35,15 +37,17 @@ export async function repointAll(
 
   for (const path of await deps.listDvcFiles(repoDir, subdir)) {
     const folder = relative(root, path).split(sep)[0] ?? "";
-    const remote = folderToSuffix(folder);
-    if (opts.provider !== undefined && remote !== opts.provider) continue;
+    let remote = config.folderToSuffix(folder);
+    const outOfScope = (): boolean => opts.provider !== undefined && remote !== opts.provider;
     try {
-      if (!isKnownFolder(folder) && opts.allowUnknownDirs !== true) {
+      const file = parseDotDvc(await deps.readFile(path));
+      remote = config.folderToSuffix(config.conflictWinners.get(file.md5) ?? folder);
+      if (outOfScope()) continue;
+      if (!config.isKnownFolder(folder) && opts.allowUnknownDirs !== true) {
         throw new Error(
           `folder "${folder}" is absent from the provider map; pass --allow-unknown-dirs to point it at public`,
         );
       }
-      const file = parseDotDvc(await deps.readFile(path));
       if (file.remote === remote) {
         entries.push({ path, status: "already", remote });
         continue;
@@ -52,6 +56,7 @@ export async function repointAll(
         await deps.writeFile(path, serializeDotDvc(setRemote(file, remote)));
       entries.push({ path, status: "repointed", remote });
     } catch (err) {
+      if (outOfScope()) continue;
       entries.push({ path, status: "error", error: (err as Error).message });
     }
   }

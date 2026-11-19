@@ -1,7 +1,10 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { ACCOUNTS, SOURCES, bucketName } from "../../src/config/sources.js";
+import { ACCOUNTS, bucketName } from "../../src/config/sources.js";
+import { retinaConfig } from "../support/config.js";
+
+const SOURCES = retinaConfig().providers;
 
 const INFRA_DIR = process.env.TRACKER_INFRA_DIR ?? join(process.cwd(), "..", "tracker-infra");
 const LIVE = join(INFRA_DIR, "live", "harvard-oi-econ-tracker");
@@ -30,7 +33,7 @@ const prefix = (region: string): string =>
   readMatch(TG(region), /bucket_name_prefix\s*=\s*"([^"]+)"/);
 
 describe.skipIf(!HAS_INFRA)("IaC reconciliation with tracker-infra (Terragrunt)", () => {
-  it("config SOURCES exactly match the per-region data_sources lists", () => {
+  it("the config file providers exactly match the per-region data_sources lists", () => {
     expect(new Set(tfSources("us-east-1"))).toEqual(new Set(SOURCES));
     expect(new Set(tfSources("us-east-2"))).toEqual(new Set(SOURCES));
   });

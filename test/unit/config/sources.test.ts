@@ -1,28 +1,7 @@
 import { describe, expect, it } from "vitest";
-import {
-  ACCOUNTS,
-  BUCKET_PREFIX,
-  SOURCES,
-  bucketName,
-  isSource,
-} from "../../../src/config/sources.js";
+import { ACCOUNTS, BUCKET_PREFIX, bucketName } from "../../../src/config/sources.js";
 
 describe("config/sources canonical naming", () => {
-  it("defines exactly the 11 TF-canonical sources", () => {
-    expect(SOURCES).toHaveLength(11);
-    expect(new Set(SOURCES).size).toBe(11);
-  });
-
-  it("uses corrected source names (coinout, not cointout)", () => {
-    expect(SOURCES).toContain("coinout");
-    expect(SOURCES as readonly string[]).not.toContain("cointout");
-  });
-
-  it("includes homebase and public as sources", () => {
-    expect(SOURCES).toContain("homebase");
-    expect(SOURCES).toContain("public");
-  });
-
   it("carries the correct old/new account IDs", () => {
     expect(ACCOUNTS.old).toBe("290048929476");
     expect(ACCOUNTS.new).toBe("305901448049");
@@ -43,11 +22,5 @@ describe("config/sources canonical naming", () => {
 
   it("account-regional names end with the mandatory -<accountId>-<region>-an marker", () => {
     expect(bucketName("affinity", "us-east-2")).toMatch(/^dvc-affinity-305901448049-us-east-2-an$/);
-  });
-
-  it("isSource narrows valid and rejects invalid names", () => {
-    expect(isSource("coinout")).toBe(true);
-    expect(isSource("cointout")).toBe(false);
-    expect(isSource("nope")).toBe(false);
   });
 });

@@ -3,6 +3,7 @@ import { bucketName } from "../../../src/config/sources.js";
 import { md5ToKey } from "../../../src/domain/dvcKey.js";
 import type { GitDvcEntry } from "../../../src/ports/gitHistory.js";
 import { buildSplitMapping, expandDirMembers } from "../../../src/services/split.js";
+import { retinaConfig } from "../../support/config.js";
 import { FakeObjectStore } from "../../support/fakeObjectStore.js";
 
 const OHIO = (stub: string): string => bucketName(stub, "us-east-2");
@@ -12,6 +13,8 @@ const B = "b0000000000000000000000000000002";
 const C = "c0000000000000000000000000000003";
 const D = "d0000000000000000000000000000004.dir";
 const M1 = "10000000000000000000000000000005";
+
+const config = retinaConfig();
 
 const entry = (md5: string, rootDir: string): GitDvcEntry => ({
   md5,
@@ -23,6 +26,7 @@ const entry = (md5: string, rootDir: string): GitDvcEntry => ({
 describe("buildSplitMapping", () => {
   it("builds a resolver that routes each md5 to its provider bucket (unmatched -> public)", () => {
     const { resolve } = buildSplitMapping({
+      config,
       gitEntries: [entry(A, "Affinity"), entry(B, "CoinOut")],
       region: "us-east-2",
     });
@@ -38,6 +42,7 @@ describe("buildSplitMapping", () => {
 
   it("reports the distinct destination bucket set (always including public) for the verify/delete union", () => {
     const { destBuckets } = buildSplitMapping({
+      config,
       gitEntries: [entry(A, "Affinity"), entry(B, "CoinOut")],
       region: "us-east-2",
     });
@@ -46,6 +51,7 @@ describe("buildSplitMapping", () => {
 
   it("expands dir members so they inherit the directory's provider", () => {
     const { resolve } = buildSplitMapping({
+      config,
       gitEntries: [entry(D, "CoinOut")],
       dirMembers: { [D]: [M1] },
       region: "us-east-2",
@@ -55,6 +61,7 @@ describe("buildSplitMapping", () => {
 
   it("surfaces an md5 mapped to two providers as a conflict (ambiguous routing)", () => {
     const { conflicts } = buildSplitMapping({
+      config,
       gitEntries: [entry(A, "Affinity"), entry(A, "Zearn")],
       region: "us-east-2",
     });
@@ -69,7 +76,7 @@ describe("expandDirMembers", () => {
 
     await store.put("old", md5ToKey(D, "v3"), `[{"md5":"${M1}","relpath":"a.csv"}]`);
 
-    const result = await expandDirMembers(store, "old", [D]);
+    const result = await expandDirMembers(store, "old", [D], config.ignoredMd5s);
     expect(result.members).toEqual({ [D]: [M1] });
     expect(result.dirReadErrors).toEqual([]);
   });
@@ -77,7 +84,7 @@ describe("expandDirMembers", () => {
   it("reports a .dir absent under both layouts as missing (non-fatal), not as a read error", async () => {
     const store = new FakeObjectStore();
     await store.ensureBucket("old");
-    const result = await expandDirMembers(store, "old", [D, D]);
+    const result = await expandDirMembers(store, "old", [D, D], config.ignoredMd5s);
     expect(result.members).toEqual({});
     expect(result.missingDirs).toEqual([D]);
     expect(result.dirReadErrors).toEqual([]);
@@ -88,7 +95,7 @@ describe("expandDirMembers", () => {
     await store.ensureBucket("old");
     store.getBytes = () =>
       Promise.reject(Object.assign(new Error("denied"), { name: "AccessDenied" }));
-    const result = await expandDirMembers(store, "old", [D]);
+    const result = await expandDirMembers(store, "old", [D], config.ignoredMd5s);
     expect(result.missingDirs).toEqual([]);
     expect(result.dirReadErrors.map((e) => e.dirMd5)).toEqual([D]);
   });

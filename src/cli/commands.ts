@@ -1,7 +1,8 @@
 import { Command } from "commander";
 import { GitHistoryCli } from "../adapters/gitHistoryCli.js";
 import type { Logger } from "../adapters/logger.js";
-import { type Region, SOURCES, bucketName, isSource } from "../config/sources.js";
+import { type LoadedConfig, loadConfigFile } from "../config/configFile.js";
+import { type Region, bucketName } from "../config/sources.js";
 import type { GitDvcEntry, GitHistory } from "../ports/gitHistory.js";
 import type { ObjectStore } from "../ports/objectStore.js";
 import {
@@ -43,6 +44,7 @@ function parseRegion(value: string): Region {
 interface CommonOptions {
   old: string;
   gitRepo: string;
+  config: string;
   subdir: string;
   region: string;
   shardLength?: number;
@@ -50,6 +52,7 @@ interface CommonOptions {
   allowUnknownDirs: boolean;
   allowUnreferenced: boolean;
   provider?: string;
+  commit?: string;
 }
 
 async function abortRun(
@@ -72,8 +75,61 @@ async function abortRun(
   return null;
 }
 
-const unknownProvider = (stub: string): string =>
-  `unknown provider "${stub}" (expected one of: ${SOURCES.join(", ")})`;
+const commitOptionHelp =
+  "walk ONLY this commit's tree (sha, branch or tag) instead of every commit on every ref; objects named only by other commits count as unreferenced and are not copied";
+
+const commitSummary = (commit: string | undefined): { commit?: string } =>
+  commit !== undefined ? { commit } : {};
+
+const failedCommitSummary = (
+  requested: string | undefined,
+  resolved: string | undefined,
+): { commit?: string; requestedCommit?: string } => {
+  if (resolved !== undefined) return { commit: resolved };
+  return requested !== undefined ? { requestedCommit: requested } : {};
+};
+
+async function resolveWalkCommit(
+  deps: CliDeps,
+  git: GitHistory,
+  gitRepo: string,
+  requested: string | undefined,
+  kind: ReportKind,
+): Promise<string | undefined> {
+  if (requested === undefined) return undefined;
+  const commit = await git.resolveCommit(gitRepo, requested);
+  deps.logger.info(
+    { commit, requested },
+    `${kind}: walking only commit ${commit} (--commit ${requested}); objects named only by other commits count as unreferenced`,
+  );
+  return commit;
+}
+
+const configOptionHelp =
+  "config file holding the providers, folder table, winner list and ignore list (e.g. config/retina-routing.json)";
+
+const configSummary = (loaded: LoadedConfig): { config: { path: string; sha256: string } } => ({
+  config: { path: loaded.path, sha256: loaded.sha256 },
+});
+
+async function loadConfigOrAbort(
+  deps: CliDeps,
+  path: string,
+  reportDir: string,
+  kind: ReportKind,
+  ts: string,
+): Promise<LoadedConfig | null> {
+  try {
+    const loaded = await loadConfigFile(path);
+    deps.logger.info(configSummary(loaded), `${kind}: using config ${loaded.path}`);
+    return loaded;
+  } catch (err) {
+    return abortRun(deps, reportDir, kind, ts, { config: { path } }, (err as Error).message);
+  }
+}
+
+const unknownProvider = (stub: string, loaded: LoadedConfig): string =>
+  `unknown provider "${stub}" (expected one of: ${loaded.config.providers.join(", ")})`;
 
 function withCommonOptions(cmd: Command, deps: CliDeps): Command {
   return cmd
@@ -82,6 +138,7 @@ function withCommonOptions(cmd: Command, deps: CliDeps): Command {
       "--git-repo <dir>",
       "code repo whose git history is the md5 -> provider mapping",
     )
+    .requiredOption("--config <path>", configOptionHelp)
     .option("--subdir <path>", "subtree containing .dvc files", "data/dvc")
     .option("--region <region>", "AWS region (us-east-1|us-east-2)", "us-east-2")
     .option(
@@ -103,6 +160,7 @@ function withCommonOptions(cmd: Command, deps: CliDeps): Command {
       "--provider <stub>",
       "scope the run to ONE provider's bucket (incremental, single-provider migrate/verify/delete); the other providers' objects are left untouched",
     )
+    .option("--commit <commit>", commitOptionHelp)
     .option("--report-dir <dir>", "directory for run reports", deps.reportDir);
 }
 
@@ -118,10 +176,12 @@ async function providerScopeOrAbort(
   o: CommonOptions,
   kind: ReportKind,
   ts: string,
+  loaded: LoadedConfig,
 ): Promise<ProviderScope | null> {
   const stub = o.provider ?? "";
-  if (!isSource(stub)) {
-    return abortRun(deps, o.reportDir, kind, ts, { old: o.old }, unknownProvider(stub));
+  if (!loaded.config.isProvider(stub)) {
+    const summary = { old: o.old, ...configSummary(loaded) };
+    return abortRun(deps, o.reportDir, kind, ts, summary, unknownProvider(stub, loaded));
   }
   const targetBucket = bucketName(stub, region);
   return { keepMd5: (md5) => split.predictBucket(md5) === targetBucket, targetBucket };
@@ -152,7 +212,7 @@ function warnUnreferenced(deps: CliDeps, kind: ReportKind, unreferenced: Set<str
   );
 }
 
-type ResolvedSplit = SplitMapping & { missingDirs: string[] };
+type ResolvedSplit = SplitMapping & { missingDirs: string[]; commit?: string };
 
 async function resolveSplitOrAbort(
   deps: CliDeps,
@@ -161,23 +221,45 @@ async function resolveSplitOrAbort(
   o: CommonOptions,
   kind: ReportKind,
   ts: string,
+  loaded: LoadedConfig,
 ): Promise<ResolvedSplit | null> {
   const git = deps.gitHistory ?? new GitHistoryCli();
+  const { config } = loaded;
+
+  if (o.commit !== undefined && o.allowUnreferenced) {
+    const reason =
+      "--commit cannot be combined with --allow-unreferenced: on a one-commit walk every object named only by other commits is unreferenced and would be routed to public";
+    const summary = { old: o.old, requestedCommit: o.commit, ...configSummary(loaded) };
+    return abortRun(deps, o.reportDir, kind, ts, summary, reason);
+  }
 
   let entries: GitDvcEntry[];
+  let commit: string | undefined;
   try {
-    entries = await git.walk(o.gitRepo, o.subdir);
+    commit = await resolveWalkCommit(deps, git, o.gitRepo, o.commit, kind);
+    entries = await git.walk(o.gitRepo, o.subdir, commit);
   } catch (err) {
-    const summary = { old: o.old, gitRepo: o.gitRepo };
+    const summary = {
+      old: o.old,
+      gitRepo: o.gitRepo,
+      ...failedCommitSummary(o.commit, commit),
+      ...configSummary(loaded),
+    };
     return abortRun(deps, o.reportDir, kind, ts, summary, (err as Error).message);
   }
 
   const dirMd5s = entries.map((e) => e.md5).filter((m) => m.endsWith(".dir"));
-  const { members, missingDirs, dirReadErrors } = await expandDirMembers(store, o.old, dirMd5s);
-  const split = buildSplitMapping({ gitEntries: entries, dirMembers: members, region });
+  const { members, missingDirs, dirReadErrors } = await expandDirMembers(
+    store,
+    o.old,
+    dirMd5s,
+    config.ignoredMd5s,
+  );
+  const split = buildSplitMapping({ config, gitEntries: entries, dirMembers: members, region });
 
+  const abortSummary = { old: o.old, ...commitSummary(commit), ...configSummary(loaded) };
   const abort = (reason: string, rows: ReportRow[]): Promise<null> =>
-    abortRun(deps, o.reportDir, kind, ts, { old: o.old }, reason, rows);
+    abortRun(deps, o.reportDir, kind, ts, abortSummary, reason, rows);
 
   if (split.conflicts.length > 0) {
     return abort(
@@ -227,7 +309,7 @@ async function resolveSplitOrAbort(
       `${kind}: ${missingDirs.length} .dir object(s) referenced in git are absent from OLD (never pushed); their members cannot be routed and count as unreferenced`,
     );
   }
-  return { ...split, missingDirs };
+  return { ...split, missingDirs, ...commitSummary(commit) };
 }
 
 interface MigrateOptions extends CommonOptions {
@@ -247,12 +329,15 @@ export function makeMigrateCommand(deps: CliDeps): Command {
     const store = deps.makeStore(region);
     const ts = deps.now();
 
-    const split = await resolveSplitOrAbort(deps, store, region, o, "migrate", ts);
+    const loaded = await loadConfigOrAbort(deps, o.config, o.reportDir, "migrate", ts);
+    if (loaded === null) return;
+
+    const split = await resolveSplitOrAbort(deps, store, region, o, "migrate", ts, loaded);
     if (split === null) return;
 
     let scope: ProviderScope | null = null;
     if (o.provider !== undefined) {
-      scope = await providerScopeOrAbort(deps, split, region, o, "migrate", ts);
+      scope = await providerScopeOrAbort(deps, split, region, o, "migrate", ts, loaded);
       if (scope === null) return;
     }
     const { keepMd5, unreferenced } = routedFilter(split, scope, o.allowUnreferenced);
@@ -274,6 +359,8 @@ export function makeMigrateCommand(deps: CliDeps): Command {
       createdAt: ts,
       summary: {
         old: o.old,
+        ...configSummary(loaded),
+        ...commitSummary(split.commit),
         ...(scope !== null ? { provider: o.provider } : {}),
         buckets: scope !== null ? 1 : split.destBuckets.length,
         shards: rep.shards,
@@ -313,12 +400,15 @@ export function makeVerifyCommand(deps: CliDeps): Command {
     const store = deps.makeStore(region);
     const ts = deps.now();
 
-    const split = await resolveSplitOrAbort(deps, store, region, o, "verify", ts);
+    const loaded = await loadConfigOrAbort(deps, o.config, o.reportDir, "verify", ts);
+    if (loaded === null) return;
+
+    const split = await resolveSplitOrAbort(deps, store, region, o, "verify", ts, loaded);
     if (split === null) return;
 
     let scope: ProviderScope | null = null;
     if (o.provider !== undefined) {
-      scope = await providerScopeOrAbort(deps, split, region, o, "verify", ts);
+      scope = await providerScopeOrAbort(deps, split, region, o, "verify", ts, loaded);
       if (scope === null) return;
     }
     const { keepMd5, unreferenced } = routedFilter(split, scope, o.allowUnreferenced);
@@ -336,6 +426,8 @@ export function makeVerifyCommand(deps: CliDeps): Command {
       createdAt: ts,
       summary: {
         old: o.old,
+        ...configSummary(loaded),
+        ...commitSummary(split.commit),
         ...(scope !== null ? { provider: o.provider } : {}),
         buckets: newBuckets.length,
         shards: vr.shards,
@@ -365,9 +457,11 @@ export function makeVerifyCommand(deps: CliDeps): Command {
 
 interface DeleteOptions {
   old: string;
+  config: string;
   region: string;
   provider?: string;
   gitRepo?: string;
+  commit?: string;
   subdir: string;
   allowUnknownDirs: boolean;
   shardLength?: number;
@@ -380,6 +474,7 @@ interface DeleteOptions {
 function withDeleteOptions(cmd: Command, deps: CliDeps): Command {
   return cmd
     .requiredOption("--old <bucket>", "source (OLD) bucket to drain proven-migrated objects from")
+    .requiredOption("--config <path>", configOptionHelp)
     .option("--region <region>", "AWS region (us-east-1|us-east-2)", "us-east-2")
     .option(
       "--provider <stub>",
@@ -389,6 +484,7 @@ function withDeleteOptions(cmd: Command, deps: CliDeps): Command {
       "--git-repo <dir>",
       "code repo whose git history is the md5 -> provider routing; an object proven only in the WRONG bucket is refused as misrouted (REQUIRED with --no-dry-run)",
     )
+    .option("--commit <commit>", `${commitOptionHelp} (requires --git-repo)`)
     .option("--subdir <path>", "subtree containing .dvc files", "data/dvc")
     .option(
       "--allow-unknown-dirs",
@@ -422,14 +518,23 @@ export function makeDeleteCommand(deps: CliDeps): Command {
     const store = deps.makeStore(region);
     const ts = deps.now();
 
-    if (o.provider !== undefined && !isSource(o.provider)) {
-      await abortRun(deps, o.reportDir, "delete", ts, { old: o.old }, unknownProvider(o.provider));
+    const loaded = await loadConfigOrAbort(deps, o.config, o.reportDir, "delete", ts);
+    if (loaded === null) return;
+    const base = { old: o.old, ...configSummary(loaded) };
+
+    if (o.provider !== undefined && !loaded.config.isProvider(o.provider)) {
+      await abortRun(deps, o.reportDir, "delete", ts, base, unknownProvider(o.provider, loaded));
       return;
     }
     if (!o.dryRun && o.gitRepo === undefined) {
       const reason =
         "--no-dry-run requires --git-repo: the misroute gate must run before anything is deleted";
-      await abortRun(deps, o.reportDir, "delete", ts, { old: o.old, dryRun: false }, reason);
+      await abortRun(deps, o.reportDir, "delete", ts, { ...base, dryRun: false }, reason);
+      return;
+    }
+    if (o.commit !== undefined && o.gitRepo === undefined) {
+      const reason = "--commit requires --git-repo: it names a commit in that repo";
+      await abortRun(deps, o.reportDir, "delete", ts, base, reason);
       return;
     }
 
@@ -439,12 +544,12 @@ export function makeDeleteCommand(deps: CliDeps): Command {
       provider = o.provider;
       providerBuckets = [bucketName(o.provider, region)];
     } else {
-      providerBuckets = [...SOURCES.filter((s) => s !== "public"), "public"].map((s) =>
-        bucketName(s, region),
+      providerBuckets = [...loaded.config.providers.filter((s) => s !== "public"), "public"].map(
+        (s) => bucketName(s, region),
       );
     }
 
-    let split: SplitMapping | null = null;
+    let split: ResolvedSplit | null = null;
     if (o.gitRepo !== undefined) {
       split = await resolveSplitOrAbort(
         deps,
@@ -453,6 +558,7 @@ export function makeDeleteCommand(deps: CliDeps): Command {
         { ...o, gitRepo: o.gitRepo, allowUnreferenced: false },
         "delete",
         ts,
+        loaded,
       );
       if (split === null) return;
     } else {
@@ -475,7 +581,8 @@ export function makeDeleteCommand(deps: CliDeps): Command {
         kind: "delete",
         createdAt: ts,
         summary: {
-          old: o.old,
+          ...base,
+          ...commitSummary(split?.commit),
           ...(provider !== undefined ? { provider } : {}),
           buckets: providerBuckets.length,
           shards: del.shards,
@@ -516,7 +623,7 @@ export function makeDeleteCommand(deps: CliDeps): Command {
         process.exitCode = 1;
       }
     } catch (err) {
-      const summary = { old: o.old, dryRun: o.dryRun };
+      const summary = { ...base, dryRun: o.dryRun };
       await abortRun(deps, o.reportDir, "delete", ts, summary, (err as Error).message);
     }
   });
@@ -524,11 +631,13 @@ export function makeDeleteCommand(deps: CliDeps): Command {
 
 interface MapOptions {
   gitRepo: string;
+  config: string;
   old: string;
   subdir: string;
   region: string;
   reportDir: string;
   allowUnknownDirs: boolean;
+  commit?: string;
 }
 
 export function makeMapCommand(deps: CliDeps): Command {
@@ -536,8 +645,10 @@ export function makeMapCommand(deps: CliDeps): Command {
     .description("Build the md5 -> provider -> bucket mapping from git history + the OLD store.")
     .requiredOption("--git-repo <dir>", "path to the code repo whose git history is walked")
     .requiredOption("--old <bucket>", "OLD object store bucket to list")
+    .requiredOption("--config <path>", configOptionHelp)
     .option("--subdir <path>", "subtree containing .dvc files", "data/dvc")
     .option("--region <region>", "AWS region (us-east-1|us-east-2)", "us-east-2")
+    .option("--commit <commit>", commitOptionHelp)
     .option(
       "--allow-unknown-dirs",
       "do not exit non-zero when a git folder is absent from the provider map (routes to public)",
@@ -550,17 +661,25 @@ export function makeMapCommand(deps: CliDeps): Command {
       const git = deps.gitHistory ?? new GitHistoryCli();
       const ts = deps.now();
 
+      const loaded = await loadConfigOrAbort(deps, o.config, o.reportDir, "map", ts);
+      if (loaded === null) return;
+      const { config } = loaded;
+
       let result: ReturnType<typeof buildMapping>;
+      let commit: string | undefined;
       try {
-        const entries = await git.walk(o.gitRepo, o.subdir);
+        commit = await resolveWalkCommit(deps, git, o.gitRepo, o.commit, "map");
+        const entries = await git.walk(o.gitRepo, o.subdir, commit);
         const storeKeys = (await store.list(o.old)).map((x) => x.key);
         const dirMd5s = entries.map((e) => e.md5).filter((m) => m.endsWith(".dir"));
         const { members: dirMembers, dirReadErrors } = await expandDirMembers(
           store,
           o.old,
           dirMd5s,
+          config.ignoredMd5s,
         );
         result = buildMapping({
+          config,
           gitEntries: entries,
           storeKeys,
           region,
@@ -568,7 +687,12 @@ export function makeMapCommand(deps: CliDeps): Command {
           dirReadErrors,
         });
       } catch (err) {
-        const summary = { old: o.old, gitRepo: o.gitRepo };
+        const summary = {
+          old: o.old,
+          gitRepo: o.gitRepo,
+          ...failedCommitSummary(o.commit, commit),
+          ...configSummary(loaded),
+        };
         await abortRun(deps, o.reportDir, "map", ts, summary, (err as Error).message);
         return;
       }
@@ -577,6 +701,8 @@ export function makeMapCommand(deps: CliDeps): Command {
         kind: "map",
         createdAt: ts,
         summary: {
+          ...configSummary(loaded),
+          ...commitSummary(commit),
           buckets: result.providerCounts,
           orphans: result.orphanMd5s.length,
           conflicts: result.conflicts.length,
@@ -639,6 +765,7 @@ export function makeMapCommand(deps: CliDeps): Command {
 
 interface RepointCliOptions {
   gitRepo: string;
+  config: string;
   subdir: string;
   provider?: string;
   allowUnknownDirs: boolean;
@@ -652,6 +779,7 @@ export function makeRepointCommand(deps: CliDeps): Command {
       "Point each .dvc out at its provider's DVC remote (sets `remote: <provider>`; the hash format is left alone so v2 outs keep reading the legacy key layout). Writes the files unless --dry-run. The named remotes must exist in .dvc/config.",
     )
     .requiredOption("--git-repo <dir>", "code repo whose .dvc files are repointed in place")
+    .requiredOption("--config <path>", configOptionHelp)
     .option("--subdir <path>", "subtree containing .dvc files", "data/dvc")
     .option(
       "--provider <stub>",
@@ -666,19 +794,22 @@ export function makeRepointCommand(deps: CliDeps): Command {
     .option("--report-dir <dir>", "directory for run reports", deps.reportDir)
     .action(async (o: RepointCliOptions) => {
       const ts = deps.now();
-      const base = { gitRepo: o.gitRepo };
+      const loaded = await loadConfigOrAbort(deps, o.config, o.reportDir, "repoint", ts);
+      if (loaded === null) return;
+      const base = { gitRepo: o.gitRepo, ...configSummary(loaded) };
       if (deps.repoint === undefined) {
         await abortRun(deps, o.reportDir, "repoint", ts, base, "no repoint deps wired");
         return;
       }
-      if (o.provider !== undefined && !isSource(o.provider)) {
-        await abortRun(deps, o.reportDir, "repoint", ts, base, unknownProvider(o.provider));
+      if (o.provider !== undefined && !loaded.config.isProvider(o.provider)) {
+        const reason = unknownProvider(o.provider, loaded);
+        await abortRun(deps, o.reportDir, "repoint", ts, base, reason);
         return;
       }
 
       let entries: Awaited<ReturnType<typeof repointAll>>;
       try {
-        entries = await repointAll(deps.repoint, o.gitRepo, o.subdir, {
+        entries = await repointAll(deps.repoint, o.gitRepo, o.subdir, loaded.config, {
           dryRun: o.dryRun,
           allowUnknownDirs: o.allowUnknownDirs,
           ...(o.provider !== undefined ? { provider: o.provider } : {}),

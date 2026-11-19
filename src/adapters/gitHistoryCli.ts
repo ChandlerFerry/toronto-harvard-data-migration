@@ -56,17 +56,37 @@ function providerFromPath(file: string, subdir: string): string {
 export class GitHistoryCli implements GitHistory {
   constructor(private readonly concurrency = 16) {}
 
-  async walk(repoDir: string, subdir: string): Promise<GitDvcEntry[]> {
-    let revList: string;
+  async resolveCommit(repoDir: string, commit: string): Promise<string> {
+    if (commit.startsWith("-")) {
+      throw new Error(`Cannot resolve --commit "${commit}": not a commit name.`);
+    }
     try {
-      revList = await git(repoDir, ["rev-list", "--all"]);
+      return (await git(repoDir, ["rev-parse", "--verify", `${commit}^{commit}`])).trim();
     } catch (err) {
       throw new Error(
-        `Cannot read git history at ${repoDir}: not a git repository or path does not exist. ` +
-          `Pass --git-repo pointing at the code repo's working tree. (${(err as Error).message})`,
+        `Cannot resolve --commit "${commit}" to a commit in ${repoDir}: pass a sha, branch or tag ` +
+          `that exists in that clone. (${(err as Error).message})`,
       );
     }
-    const commits = nonEmptyLines(revList);
+  }
+
+  // Without `onlyCommit`: every commit on every ref. With it: that one commit's tree only.
+  async walk(repoDir: string, subdir: string, onlyCommit?: string): Promise<GitDvcEntry[]> {
+    let commits: string[];
+    if (onlyCommit !== undefined) {
+      commits = [onlyCommit];
+    } else {
+      let revList: string;
+      try {
+        revList = await git(repoDir, ["rev-list", "--all"]);
+      } catch (err) {
+        throw new Error(
+          `Cannot read git history at ${repoDir}: not a git repository or path does not exist. ` +
+            `Pass --git-repo pointing at the code repo's working tree. (${(err as Error).message})`,
+        );
+      }
+      commits = nonEmptyLines(revList);
+    }
     const limit = pLimit(this.concurrency);
     const collected: GitDvcEntry[] = [];
 

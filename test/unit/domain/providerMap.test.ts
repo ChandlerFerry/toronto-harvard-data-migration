@@ -1,12 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { bucketName } from "../../../src/config/sources.js";
-import {
-  PROVIDER_FOLDER_SUFFIX,
-  UNMATCHED_SUFFIX,
-  folderToSuffix,
-  generateBucketName,
-  isKnownFolder,
-} from "../../../src/domain/providerMap.js";
+import { UNMATCHED_SUFFIX, createProviderMap } from "../../../src/domain/providerMap.js";
+import { retinaConfig } from "../../support/config.js";
+
+const { folders } = retinaConfig();
+const { folderToSuffix, generateBucketName, isKnownFolder } = createProviderMap(folders);
 
 describe("folderToSuffix", () => {
   it.each([
@@ -51,7 +49,7 @@ describe("folderToSuffix", () => {
   );
 
   it("never emits the buggy cointout spelling", () => {
-    expect(Object.values(PROVIDER_FOLDER_SUFFIX)).not.toContain("cointout");
+    expect(Object.values(folders)).not.toContain("cointout");
   });
 });
 
